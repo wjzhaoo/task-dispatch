@@ -1,0 +1,4 @@
+interface:
+  display_name: "Task Dispatch 任务分派"
+  short_description: "为游戏与应用开发拆分任务，按风险安排模型执行和阶段审核"
+  default_prompt: "使用 $task-dispatch，根据当前需求生成可交接任务包，并标注模型角色、依赖和审核点。"

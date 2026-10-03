@@ -1,0 +1,5 @@
+{
+  "exclude": ["data/", "tmp/", ".pytest_cache/", "frontend/dist/"],
+  "maxTotalBytes": 268435456,
+  "maxFileBytes": 33554432
+}

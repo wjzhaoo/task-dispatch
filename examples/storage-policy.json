@@ -1,0 +1,6 @@
+{
+  "automatic": true,
+  "retainDays": 7,
+  "keepLatestAccepted": 2,
+  "maxBytes": 10737418240
+}

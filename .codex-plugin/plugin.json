@@ -1,0 +1,18 @@
+{
+  "name": "task-dispatch",
+  "version": "1.0.0",
+  "description": "游戏与应用开发的分层任务分派、依赖门禁和批量审核流程。",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Task Dispatch",
+    "shortDescription": "强模型设计与验收，经济模型执行明确任务。",
+    "longDescription": "按风险与依赖拆分游戏和应用开发任务，生成可交接任务包，执行相关检查，并在基础接口或功能里程碑进行审核。支持手动交接和已配置的模型执行工具。",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "使用 $task-dispatch，为当前需求拆分任务、分配模型角色并设置审核点。"
+  }
+}

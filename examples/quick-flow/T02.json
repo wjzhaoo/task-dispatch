@@ -1,0 +1,11 @@
+{
+  "id": "T02",
+  "title": "读取数字并加 1",
+  "instructions": "读取 input.txt，将其中的数字加 1，把结果 2 写入 output.txt，UTF-8 无 BOM，允许末尾换行。只修改 output.txt。使用 node -e \"const f=require('fs');const a=f.readFileSync('input.txt','utf8'),b=f.readFileSync('output.txt','utf8');if(a.trim()!=='1'||b.trim()!=='2'||b.charCodeAt(0)===65279)process.exit(1)\" 检查，报告实际结果，然后提交服务回执。无需调研、安装依赖、构建或额外文档。",
+  "acceptance": "input.txt 保持为 1；output.txt 存在，UTF-8 无 BOM，去除首尾空白后严格等于 2；检查成功，未修改其他文件。",
+  "allowedPaths": ["output.txt"],
+  "dependsOn": ["T01"],
+  "workerId": "quick",
+  "requiredCapability": "quick-flow",
+  "maxAttempts": 10
+}

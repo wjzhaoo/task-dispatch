@@ -1,0 +1,12 @@
+{
+  "_note": "[AI-added] 2026-09-22 09:20 Synthetic offline fixture",
+  "firstCall": 1,
+  "lastCall": 3,
+  "raw": [
+    {"id": "a", "status": "success", "shots": ["镜头甲"]},
+    {"id": "b", "status": "failed", "shots": ["已有草稿乙"]}
+  ],
+  "ledger": [{"index": 1, "scenario": "a"}, {"index": 2, "scenario": "a"}, {"index": 3, "scenario": "b"}],
+  "anonymous": [{"scenario": "a", "shots": ["镜头甲"]}, {"scenario": "b", "shots": ["已有草稿乙"]}],
+  "report": {"totalCalls": 3, "scenarios": [{"id": "a", "status": "success", "shots": 1, "calls": [1, 2]}, {"id": "b", "status": "failed", "shots": 1, "calls": [3]}]}
+}

@@ -1,0 +1,15 @@
+{
+  "projectId": "REPLACE_PROJECT_ID",
+  "taskId": "REPLACE_TASK_ID",
+  "attemptId": "REPLACE_ATTEMPT_ID",
+  "usage": {
+    "provider": "REPLACE_ACTUAL_PROVIDER",
+    "model": "REPLACE_ACTUAL_MODEL",
+    "source": "REPLACE_ACTUAL_METER_SOURCE",
+    "scope": "attempt",
+    "inputTokens": null,
+    "cachedInputTokens": null,
+    "outputTokens": null,
+    "reasoningOutputTokens": null
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "dependencies": "copy-node-modules",
+  "checks": [
+    ["run", "check"],
+    ["run", "test", "--", "tests/unit/security.test.ts", "tests/integration/http-boundary.test.ts"],
+    ["run", "test"]
+  ],
+  "outputs": ["tmp/", "coverage/"],
+  "timeoutMs": 300000
+}

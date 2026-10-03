@@ -1,0 +1,11 @@
+{
+  "rationale": "流程冒烟测试：两个文件小任务串行执行，一个经济模型执行员即可。quick-flow 是本测试的任务能力标签，不代表特定模型。独立 reviewer 负责初审，不计入执行员列表。",
+  "workers": [
+    {
+      "workerId": "quick",
+      "capability": "quick-flow",
+      "responsibilities": "只领取本测试任务，写入指定文本文件，执行给定检查并提交真实回执。"
+    }
+  ],
+  "concurrencyRequested": false
+}

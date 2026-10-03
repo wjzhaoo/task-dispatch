@@ -1,0 +1,8 @@
+{
+  "id": "T01",
+  "title": "完善 README 的运行说明",
+  "instructions": "根据项目实际文件，补充 README.md 的本地启动方式；不要猜测不存在的命令。",
+  "acceptance": "命令与项目脚本一致，原有说明保留；报告实际核对结果。",
+  "allowedPaths": ["README.md"],
+  "dependsOn": []
+}

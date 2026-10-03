@@ -1,0 +1,9 @@
+{
+  "id": "task-dispatch.qoder-bridge",
+  "name": "task-dispatch-qoder-bridge",
+  "version": "1.0.0",
+  "engines": { "qoder": ">=0.0.1" },
+  "main": "dist/node/main.cjs",
+  "activationEvents": ["onStartup"],
+  "permissions": ["chat.observeTurn", "chat.continueSession"]
+}
