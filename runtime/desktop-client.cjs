@@ -44,7 +44,7 @@ async function main() {
 正常使用不需要 --workspace；客户端从当前会话真实工作目录登记项目。所有命令可追加 --data "服务数据目录" 作为兼容/诊断覆盖；新项目默认使用工作区内的独立服务目录，已有凭据沿用原目录。
 删除项目服务目录前必须先停止该项目服务；不会自动迁移或删除旧的用户目录数据。
 connect/rebind 必须显式传真实 --provider。wake 平台还必须核实真实 session；Codex 仅在 --provider codex 后可读取 CODEX_THREAD_ID，Qoder 首次连接可传邀请的一次性 --invitation-id。discover-session 是显式 provider 的只读诊断；Qoder connect 可用同一握手记录完成首次绑定。
-平台 Skill 安装仅支持 codex、mimo、qoder、qodercn。`);
+平台 Skill 安装支持 codex、mimo、qoder、qodercn、opencode。OpenCode 2.x 需 Node.js 22.13+ 和真实 ses_ 会话 ID。`);
     return;
   }
   let rebinding = command === 'rebind';

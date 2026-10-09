@@ -12,8 +12,8 @@ const cli = path.resolve(__dirname, '../runtime/desktop-client.cjs');
 test('connect requires an explicit non-auto provider before any service or credential side effect',async()=>{
   const base=path.resolve(__dirname,'../tmp');fs.mkdirSync(base,{recursive:true});
   const temp=fs.mkdtempSync(path.join(base,'provider-required-')),root=path.join(temp,'service'),workspace=path.join(temp,'project');fs.mkdirSync(workspace);
-  for(const extra of [[],['--provider','auto'],['--provider','mimo']]){
-    await assert.rejects(execFile(process.execPath,[cli,'connect','--data',root,'--workspace',workspace,...extra],{cwd:workspace,windowsHide:true}),extra[1]==='mimo'?/real --session-id/:/Ask the user to choose the current platform/);
+  for(const extra of [[],['--provider','auto'],['--provider','mimo'],['--provider','opencode']]){
+    await assert.rejects(execFile(process.execPath,[cli,'connect','--data',root,'--workspace',workspace,...extra],{cwd:workspace,windowsHide:true}),['mimo','opencode'].includes(extra[1])?/real --session-id/:/Ask the user to choose the current platform/);
     assert.equal(fs.existsSync(root),false);
   }
 });

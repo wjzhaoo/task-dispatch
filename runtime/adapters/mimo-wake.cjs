@@ -205,7 +205,7 @@ constructor(options = {}) { this.adapters = { codex: new (require('./codex-wake.
 /* Previous implementation:
 constructor(options = {}) { const codearts = new (require('./codearts-wake.cjs').CodeArtsWake)(options.codearts); this.adapters = { codex: new (require('./codex-wake.cjs').CodexWake)(), mimo: new MimoWake(options.mimo), codearts, codeartsdoer: codearts }; }
 */
-constructor(options = {}) { const codearts = new (require('./codearts-wake.cjs').CodeArtsWake)(options.codearts); const qoder = new (require('./qoder-wake.cjs').QoderWake)(options.qoder); this.adapters = { codex: new (require('./codex-wake.cjs').CodexWake)(), mimo: new MimoWake(options.mimo), codearts, qoder }; }
+constructor(options = {}) { const codearts = new (require('./codearts-wake.cjs').CodeArtsWake)(options.codearts); const qoder = new (require('./qoder-wake.cjs').QoderWake)(options.qoder); const opencode = new (require('./opencode-wake.cjs').OpenCodeWake)(options.opencode); this.adapters = { codex: new (require('./codex-wake.cjs').CodexWake)(), mimo: new MimoWake(options.mimo), codearts, qoder, opencode }; }
   forProvider(provider) { provider=require('../core/platforms.cjs').normalizeProvider(provider)||'codex';if (!Object.hasOwn(this.adapters, provider)) throw Error('Wake provider not connected: ' + provider); return this.adapters[provider]; }
 }
 module.exports = { MimoWake, WakeProviders, effectivePermission };

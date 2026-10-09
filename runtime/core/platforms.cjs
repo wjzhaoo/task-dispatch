@@ -6,13 +6,14 @@
 const ALIASES = Object.freeze({
   qodercn: 'qoder',
   'qoder-cn': 'qoder',
-  codeartsdoer: 'codearts'
+  codeartsdoer: 'codearts',
+  'open-code': 'opencode'
 });
 const ROLE_PROVIDERS = Object.freeze({
-  brain: Object.freeze(['codex', 'mimo', 'qoder']),
-  reviewer: Object.freeze(['codex', 'mimo', 'qoder'])
+  brain: Object.freeze(['codex', 'mimo', 'qoder', 'opencode']),
+  reviewer: Object.freeze(['codex', 'mimo', 'qoder', 'opencode'])
 });
-const WAKE_PROVIDERS = Object.freeze(['codex', 'mimo', 'qoder', 'codearts']);
+const WAKE_PROVIDERS = Object.freeze(['codex', 'mimo', 'qoder', 'codearts', 'opencode']);
 const DISCOVERY_PROVIDERS = Object.freeze(['mimo', 'codearts']);
 const PROVIDER_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 
@@ -28,7 +29,8 @@ function continuationMode(provider) { return WAKE_PROVIDERS.includes(normalizePr
 function assertRoleProvider(role, provider) {
   const normalized = normalizeProvider(provider);
   if (normalized && ROLE_PROVIDERS[role] && !ROLE_PROVIDERS[role].includes(normalized)) {
-    throw Error(`${role} only supports codex, mimo or qoder host providers`);
+    const providers = ROLE_PROVIDERS[role];
+    throw Error(`${role} only supports ${providers.slice(0, -1).join(', ')} or ${providers.at(-1)} host providers`);
   }
   return normalized;
 }

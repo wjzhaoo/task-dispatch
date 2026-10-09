@@ -3,7 +3,7 @@
 // [AI-added] 2026-09-17 09:42
 const crypto = require('node:crypto');
 const path = require('node:path');
-const {ROLE_PROVIDERS, continuationMode} = require('./platforms.cjs');
+const {ROLE_PROVIDERS, WAKE_PROVIDERS, continuationMode} = require('./platforms.cjs');
 
 // [AI-added] 2026-09-17 09:42
 const SCHEMA_VERSION = 1;
@@ -14,6 +14,7 @@ const SESSION_REQUIREMENTS = Object.freeze({
   mimo: '必须使用宿主提供的当前真实 --session-id。',
   qoder: '首次连接可使用本邀请的一次性 --invitation-id，由本机提示 Hook 和桥接核实真实会话。',
   codearts: 'worker 必须使用宿主提供的当前真实 --session-id。',
+  opencode: '必须使用宿主提供的当前真实 ses_ 会话 ID；需要 OpenCode 2.x 和 Node.js 22.13+。',
   waitOnly: '其他合法 worker provider 进入 wait，不要求 session ID。'
 });
 const ROLE_TEMPLATES = Object.freeze({
@@ -37,17 +38,18 @@ const REBIND_PLATFORMS = Object.freeze({
   codex: Object.freeze({ label: 'Codex', sessionIdRequired: false, hint: '客户端在显式 --provider codex 后读取本会话的 CODEX_THREAD_ID；读取不到时向用户索取宿主显示的 thread ID 再追加 --session-id。' }),
   mimo: Object.freeze({ label: 'MiMo', sessionIdRequired: true, hint: 'wake 平台必须由宿主提供真实 --session-id：先把本提示词发给目标会话，再用 discover-session --provider mimo --invitation-id <本邀请标识> 只读定位当前会话 ID。本邀请的 --invitation-id 只表示改绑授权，不能替代会话身份。' }),
   qoder: Object.freeze({ label: 'Qoder', sessionIdRequired: false, hint: '先把本提示词发给目标 Qoder 会话，UserPromptSubmit 握手 Hook 记下会话与邀请标识后，只需本邀请的一次性 --invitation-id，由 Hook 与 App Plugin 桥核实真实会话和工作区，不需要人工查 session ID。' }),
-  codearts: Object.freeze({ label: 'CodeArts', sessionIdRequired: true, hint: 'wake 平台必须由宿主提供真实 --session-id：先把本提示词发给目标会话（Hook 会按会话写出本机发现文件），再用 discover-session --provider codearts --invitation-id <本邀请标识> 只读定位当前会话 ID；不要手工打开宿主数据库，也不得用同目录旧会话的 ID 顶替。' })
+  codearts: Object.freeze({ label: 'CodeArts', sessionIdRequired: true, hint: 'wake 平台必须由宿主提供真实 --session-id：先把本提示词发给目标会话（Hook 会按会话写出本机发现文件），再用 discover-session --provider codearts --invitation-id <本邀请标识> 只读定位当前会话 ID；不要手工打开宿主数据库，也不得用同目录旧会话的 ID 顶替。' }),
+  opencode: Object.freeze({ label: 'OpenCode', sessionIdRequired: true, hint: '使用宿主提供的当前真实 ses_ 会话 ID，填写 --session-id。需要 OpenCode 2.x、Node.js 22.13+、可读取的会话数据库和官方 CLI；客户端只核验指定会话及工作目录，不按标题或目录猜测身份。省略 --model 沿用原会话模型。' })
 });
 const REBIND_ANY_PLATFORM = Object.freeze({ label: '由接收端确认平台', sessionIdRequired: false, hint: '接收端先确认自己所在平台，再把 <当前真实平台> 换成真实 provider；wake 平台还要补真实 --session-id。' });
 const REBIND_WAIT_PLATFORM = Object.freeze({ label: '其他等待型平台', sessionIdRequired: false, hint: '等待型平台不要求 --session-id，接入后按回执进入 wait；provider 必须是宿主实际平台名，不允许 auto。' });
 function rebindPlatformOrder(role) {
-  return role === 'worker' ? ['codex', 'mimo', 'qoder', 'codearts', 'wait'] : [...(ROLE_PROVIDERS[role] || [])];
+  return role === 'worker' ? [...WAKE_PROVIDERS, 'wait'] : [...(ROLE_PROVIDERS[role] || [])];
 }
 
 // [AI-added] 2026-09-17 09:42
 function providerChoices(role) {
-  return role === 'worker' ? ['codex', 'mimo', 'qoder', 'codearts', '其他合法等待型平台'] : [...ROLE_PROVIDERS[role]];
+  return role === 'worker' ? [...WAKE_PROVIDERS, '其他合法等待型平台'] : [...ROLE_PROVIDERS[role]];
 }
 
 // [AI-added] 2026-09-17 09:42
@@ -71,7 +73,7 @@ function buildInvitation({role, workspace, dataRoot, clientPath, referencePath, 
   const options = providerChoices(role), operation = template.operation;
   const commandTemplate = buildCommand({operation, role, workerId, capability, dataRoot});
   const handshake = `本次邀请标识：[TASK-DISPATCH-INVITE:${invitationId}]。若接收端确认自己是 Qoder，首次 connect/rebind 追加 --invitation-id ${invitationId}，无需手工查找 --session-id；其他平台不得用该标识推断会话。`;
-  const platformGuide = `平台确认只由本邀请接收端完成；发送邀请的大脑不得代问、代选或猜测。接收端执行连接前必须询问当前会话的用户“当前会话平台是什么？”，并从 ${options.join(' / ')} 中明确选择。确认后将命令中的 <当前真实平台> 替换为真实 provider；用户未选择或平台信息缺失时停止连接，不能使用 auto 或静默降级。Codex 显式选择后可读取 CODEX_THREAD_ID；MiMo、CodeArts 等 wake 平台必须使用宿主提供的真实 --session-id；Qoder 可按本邀请的一次性标识连接。不要读取或输出连接令牌、完整会话列表、进程环境或数据库。`;
+  const platformGuide = `平台确认只由本邀请接收端完成；发送邀请的大脑不得代问、代选或猜测。接收端执行连接前必须询问当前会话的用户“当前会话平台是什么？”，并从 ${options.join(' / ')} 中明确选择。确认后将命令中的 <当前真实平台> 替换为真实 provider；用户未选择或平台信息缺失时停止连接，不能使用 auto 或静默降级。Codex 显式选择后可读取 CODEX_THREAD_ID；MiMo、CodeArts、OpenCode 等 wake 平台必须使用宿主提供的真实 --session-id；Qoder 可按本邀请的一次性标识连接。不要读取或输出连接令牌、完整会话列表、进程环境或数据库。`;
   const identityGuide = role === 'worker' ? `worker 编号：${workerId}。${capability ? `本执行员要求能力 ${capability}，先核实当前模型配置符合用户要求；不符合则不要声明该能力并说明缺项。` : ''}` : '';
   const text = `${DISPATCH_CONTEXT} ${handshake} ${template.title}项目目录：${workspace}；客户端：${path.resolve(clientPath)}；服务目录：${dataRoot}。${identityGuide}读取 ${path.resolve(referencePath)}，在该项目目录执行 ${commandTemplate}。${platformGuide}${template.roleGuide}${CONTINUATION_GUIDE}`;
   return {
@@ -99,7 +101,7 @@ function rebindVariant(provider, { role, workerId, capability, invitationId, dat
   if (!spec) throw Error('Unsupported rebind platform ' + provider);
   const commandTemplate = `rebind --managed-rebind --provider ${spec.flag}${spec.sessionIdRequired ? ' --session-id <当前真实会话 ID>' : ''} --role ${role}${role === 'worker' ? ` --worker-id ${workerId}${capability ? ` --capability ${capability}` : ''}` : ''} --invitation-id ${invitationId} --data "${dataRoot}"${recover ? ' --recover --confirmed-stopped' : ''}`;
   const platformGuide = provider === 'any'
-    ? `平台适配：${spec.hint} Codex 显式选择后读取 CODEX_THREAD_ID，MiMo、CodeArts 等 wake 平台必须使用宿主提供的真实 --session-id，Qoder 可用本邀请的一次性 --invitation-id。`
+    ? `平台适配：${spec.hint} Codex 显式选择后读取 CODEX_THREAD_ID，MiMo、CodeArts、OpenCode 等 wake 平台必须使用宿主提供的真实 --session-id，Qoder 可用本邀请的一次性 --invitation-id。`
     : `平台适配（${spec.label}）：${spec.hint}接收会话若不是 ${spec.label}，改用对应平台的提示词，不要沿用本条命令或伪造会话 ID。`;
   // The Qoder handshake Hook and discover-session only recognise the INVITE marker, so a
   // managed rebind must carry it next to its own label or the receiving session cannot bind.

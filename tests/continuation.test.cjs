@@ -73,11 +73,23 @@ test('explicit unsupported host persists wait; existing wake and completion take
   f.binding.wake={provider:'codearts'};assert.equal((await configure(f.wake,f.identity,{provider:'other-host'})).nextAction,'park');
   f.project.completedAt='now';assert.equal((await configure(f.wake,f.identity)).nextAction,'stop');
 });
+test('OpenCode supports all roles, preserves explicit model and never falls back to wait',async()=>{
+  for(const role of ['brain','reviewer','worker'])for(const provider of ['opencode','open-code']){
+    const f=fixture({opencode:input=>{assert.equal(input.workspace,process.cwd());return info();}},role);
+    const result=await configure(f.wake,f.identity,{provider,model:'fixture/model'});
+    assert.equal(result.mode,'wake');assert.equal(result.provider,'opencode');
+    assert.equal(f.binding.wake.model,'fixture/model');assert.deepEqual(f.calls,['opencode']);
+  }
+  const f=fixture({},'worker');
+  assert.equal((await configure(f.wake,f.identity,{provider:'opencode'})).nextAction,'attention');
+  assert.equal(f.binding.continuation,undefined);
+  await assert.rejects(configure(f.wake,f.identity,{provider:'opencode',noWake:true}),/wait-only/);
+});
 test('brain and reviewer reject worker-only providers before continuation is stored',async()=>{
   for(const role of ['brain','reviewer']){
     const f=fixture({},role);
-    await assert.rejects(configure(f.wake,f.identity,{provider:'codearts'}),/only supports codex, mimo or qoder/);
-    await assert.rejects(configure(f.wake,f.identity,{provider:'zcode'}),/only supports codex, mimo or qoder/);
+    await assert.rejects(configure(f.wake,f.identity,{provider:'codearts'}),/only supports codex, mimo, qoder or opencode/);
+    await assert.rejects(configure(f.wake,f.identity,{provider:'zcode'}),/only supports codex, mimo, qoder or opencode/);
     assert.equal(f.binding.continuation,undefined);
   }
 });

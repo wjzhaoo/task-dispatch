@@ -14,7 +14,7 @@
 
 `start.bat` 是桌面客户端入口；`dashboard.bat` 打开统一 Web 控制台。Skill 安装器生成 `runtime-link.json` 指向本仓库客户端，不复制或启动服务。仓库移动后需重新安装更新链接。
 
-各角色通过 `runtime/desktop-client.cjs connect --provider <真实平台>` 接入。brain/reviewer 使用 Codex、MiMo 或 Qoder；worker 可使用其他支持的平台。角色必须明确自身平台，遵守真实会话身份要求，不复用其他角色凭据。接入细节见[连接发现](../skills/task-dispatch/references/connection.md)、[桌面会话](../skills/task-dispatch/references/desktop.md)和[多执行员](../skills/task-dispatch/references/workers.md)。
+各角色通过 `runtime/desktop-client.cjs connect --provider <真实平台>` 接入。brain/reviewer 使用 Codex、MiMo、Qoder 或 OpenCode；worker 可使用其他支持的平台。角色必须明确自身平台，遵守真实会话身份要求，不复用其他角色凭据。接入细节见[连接发现](../skills/task-dispatch/references/connection.md)、[桌面会话](../skills/task-dispatch/references/desktop.md)和[多执行员](../skills/task-dispatch/references/workers.md)。
 
 连接阶段由大脑登记 staffing、展示邀请并核对角色就绪，不派发任务。计划中的 worker 和必需的 reviewer 就绪，且用户已给出开始指令后，大脑调用：
 

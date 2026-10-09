@@ -2,7 +2,7 @@
 
 ## 通用接入入口
 
-优先执行客户端生成的 connect 命令，并由当前接收端明确追加 `--provider <真实平台>`。大脑不得替接收端猜测。Codex 在显式 provider 后可读取 CODEX_THREAD_ID；MiMo、CodeArts 等 wake 宿主必须传真实 `--session-id`；Qoder 首次连接可传当前邀请的一次性 `--invitation-id`。connect/rebind 不调用跨平台会话发现。
+优先执行客户端生成的 connect 命令，并由当前接收端明确追加 `--provider <真实平台>`。大脑不得替接收端猜测。Codex 在显式 provider 后可读取 CODEX_THREAD_ID；MiMo、CodeArts、OpenCode 等 wake 宿主必须传真实 `--session-id`；Qoder 首次连接可传当前邀请的一次性 `--invitation-id`。connect/rebind 不调用跨平台会话发现。
 
 身份发现失败返回 `identified:false` 与 `attention`；不能按目录、会话标题或时间猜测，更不能自行打印令牌、完整会话列表或扫描数据库。下文的平台协议用于维护适配器和处理明确缺项，日常接入不需要模型复现这些步骤。
 
@@ -34,7 +34,7 @@ status.startup.state 为 waiting 时不得派单；started 表示已启动。
 
 ### Codex Desktop：优先使用事件唤醒（用户已授权时）
 
-Windows Codex Desktop 已实现实验性原会话唤醒。先按下方 attach 接入，再执行 wake-bind。MiMo 使用后面的独立接入步骤；CodeArts 使用 [CodeArts 接入](codearts.md)；Qoder/QoderCN 需先安装常驻 App Plugin 直接唤醒桥接，再按 [Qoder 原会话接入](qoder.md) 用 `resume --provider qoder` 绑定；其他平台继续阻塞模式。
+Windows Codex Desktop 已实现实验性原会话唤醒。先按下方 attach 接入，再执行 wake-bind。MiMo 使用后面的独立接入步骤；CodeArts 使用 [CodeArts 接入](codearts.md)；Qoder/QoderCN 需先安装常驻 App Plugin 直接唤醒桥接，再按 [Qoder 原会话接入](qoder.md) 用 `resume --provider qoder` 绑定；OpenCode 2.x 使用真实 `ses_...` ID 和官方 CLI，按 [OpenCode 原会话接入](opencode.md) 连接；其他平台继续阻塞模式。
 
 启用前停止本会话旧 wait 进程，确认其退出后清理遗留 `.wait.lock`。不要停止其他项目的进程。获取当前会话真实 threadId（可用环境变量 CODEX_THREAD_ID），用应用 read_thread 工具读取该会话最近一个真实 turnId；不得编造 ID 或借用其他会话。当前工具不可用时请用户提供会话信息，保留阻塞模式，不猜测。
 
@@ -108,7 +108,7 @@ node "<客户端脚本>" submit --file "<结果JSON>" --credential "<本会话�
 
 ## 通用续接入口
 
-邀请可以不预填平台，但接收端执行 `connect/rebind` 时必须明确追加真实 `--provider`，`auto` 无效。brain/reviewer 只允许 codex、mimo、qoder；worker 可使用合法 provider。codex、mimo、qoder、codearts 都必须核验真实 session ID 和项目目录后 wake；其中 qoder 首次连接可由邀请 ID 安全解析 session，其他 wake 平台沿用各自宿主来源。其他 worker provider 直接 wait，无需真实 session ID。首次 resume 配置同样要求 provider，已有绑定才可省略复用。
+邀请可以不预填平台，但接收端执行 `connect/rebind` 时必须明确追加真实 `--provider`，`auto` 无效。brain/reviewer 支持 codex、mimo、qoder、opencode；worker 可使用合法 provider。codex、mimo、qoder、codearts、opencode 都必须核验真实 session ID 和项目目录后 wake；其中 qoder 首次连接可由邀请 ID 安全解析 session，其他 wake 平台沿用各自宿主来源。其他 worker provider 直接 wait，无需真实 session ID。首次 resume 配置同样要求 provider，已有绑定才可省略复用。
 
 接入后和每次提交后统一执行：
 

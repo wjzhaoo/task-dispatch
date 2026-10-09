@@ -1,10 +1,12 @@
 'use strict';
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { install, PLATFORMS } = require('./install');
-const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'task-dispatch-test-'));
+const tempBase = path.resolve(__dirname, '../tmp');
+fs.mkdirSync(tempBase, { recursive: true });
+const temp = fs.mkdtempSync(path.join(tempBase, 'task-dispatch-test-'));
+process.on('exit', () => fs.rmSync(temp, { recursive: true, force: true }));
 const home = path.join(temp, 'test home');
 const root = path.join(temp, 'source');
 fs.mkdirSync(path.join(root, '.codex-plugin'), { recursive: true });
@@ -18,7 +20,7 @@ fs.writeFileSync(source, 'version one');
 */
 fs.writeFileSync(source, '---\nname: task-dispatch\ndescription: verification fixture\n---\n\nversion one');
 const options = { platforms: Object.keys(PLATFORMS), home, root };
-assert.deepEqual(Object.keys(PLATFORMS), ['codex', 'mimo', 'qoder', 'qodercn']);
+assert.deepEqual(Object.keys(PLATFORMS), ['codex', 'mimo', 'qoder', 'qodercn', 'opencode']);
 install({ ...options, dryRun: true });
 assert.equal(fs.existsSync(home), false);
 install(options);
@@ -79,11 +81,22 @@ assert.equal(runtimeLink.data,undefined);
 assert.ok(install({ platforms: ['qoder'], home: qoderHome }).every(p => p.writes.length === 0));
 for (const [index, content] of ['# no frontmatter', '---\nname: task-dispatch\n---\n', '---\ndescription: fixture\n---\n'].entries()) {
   fs.writeFileSync(path.join(invalidRoot, 'skills/task-dispatch/SKILL.md'), content);
-  for (const platform of ['qoder', 'qodercn']) {
+  for (const platform of ['qoder', 'qodercn', 'opencode']) {
     const invalidHome = path.join(temp, `invalid-${platform}-${index}`);
-    assert.throws(() => install({ platforms: [platform], home: invalidHome, root: invalidRoot }), /Qoder.*YAML frontmatter/);
+    assert.throws(() => install({ platforms: [platform], home: invalidHome, root: invalidRoot }), /(?:Qoder|OpenCode).*YAML frontmatter/);
     assert.equal(fs.existsSync(invalidHome), false);
   }
 }
 console.log('PASS: Qoder payload, runtime link, repeat install and frontmatter preflight.');
-console.log('Test files retained at: ' + temp);
+const opencodeHome = path.join(temp, 'opencode package home');
+const [opencodePlan] = install({ platforms: ['opencode'], home: opencodeHome });
+const opencodeTarget = path.join(opencodeHome, '.config/opencode/skills/task-dispatch');
+assert.equal(opencodePlan.target, opencodeTarget);
+assert.ok(fs.existsSync(path.join(opencodeTarget, 'SKILL.md')));
+assert.ok(fs.existsSync(path.join(opencodeTarget, 'references/opencode.md')));
+assert.equal(JSON.parse(fs.readFileSync(path.join(opencodeTarget, 'runtime-link.json'), 'utf8')).client, path.resolve(__dirname, '../runtime/desktop-client.cjs'));
+assert.equal(fs.existsSync(path.join(opencodeHome, '.config/opencode/opencode.json')), false);
+assert.ok(install({ platforms: ['opencode'], home: opencodeHome }).every(p => p.writes.length === 0));
+fs.writeFileSync(path.join(opencodeTarget, 'SKILL.md'), 'user edits');
+assert.throws(() => install({ platforms: ['opencode'], home: opencodeHome }), /Local file conflict/);
+console.log('PASS: OpenCode installation, runtime link, no configuration edits, repeat install and conflict preservation.');

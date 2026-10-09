@@ -13,7 +13,8 @@ const PLATFORMS = {
   mimo: '.config/mimocode/skills',
   // [AI-added] 2026-09-15 19:05
   qoder: '.qoder/skills',
-  qodercn: '.qoder-cn/skills'
+  qodercn: '.qoder-cn/skills',
+  opencode: '.config/opencode/skills'
 };
 const QODER_HOOK_PREFIX = 'task-dispatch-qoder';
 const QODER_BRIDGE_RELATIVE = 'app/dev-extensions/task-dispatch-bridge';
@@ -156,8 +157,8 @@ const sharedPayload = Object.fromEntries(files(source).map(f => [f, fs.readFileS
   // [AI-added] 2026-09-14 17:19
   if (ids.includes('mimo')) validateYamlSkill(sharedPayload['SKILL.md']);
   // [AI-added] 2026-09-16: Validate both Qoder products before planning writes.
-  for (const id of ['qoder', 'qodercn']) {
-    if (ids.includes(id)) validateYamlSkill(sharedPayload['SKILL.md'], id === 'qoder' ? 'Qoder' : 'QoderCN');
+  for (const id of ['qoder', 'qodercn', 'opencode']) {
+    if (ids.includes(id)) validateYamlSkill(sharedPayload['SKILL.md'], id === 'qoder' ? 'Qoder' : id === 'qodercn' ? 'QoderCN' : 'OpenCode');
   }
   const payload = sharedPayload;
   // [AI-added] 2026-09-16 16:00
@@ -223,7 +224,7 @@ const dest = path.join(target, f);
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes('--help')) {
-    console.log('node scripts/install.js [all|codex|mimo|qoder|qodercn] [--dry-run] [--home DIRECTORY]\nNo platform: interactive selection. Default selection: all.\nPlatforms: ' + Object.keys(PLATFORMS).join(', '));
+    console.log('node scripts/install.js [all|codex|mimo|qoder|qodercn|opencode] [--dry-run] [--home DIRECTORY]\nNo platform: interactive selection. Default selection: all.\nPlatforms: ' + Object.keys(PLATFORMS).join(', '));
     return;
   }
   let selection, home = os.homedir(), dryRun = false;

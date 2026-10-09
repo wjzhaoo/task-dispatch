@@ -20,6 +20,29 @@ class Wake {
     if (provider !== 'codex') throw Error('Wake provider not connected: '+provider);
     return this.adapter;
   }
+  send(adapter,binding,message,timeoutMs=this.sendTimeoutMs) {
+    if(binding.provider!=='opencode')return hostCall.send(adapter,binding,message,timeoutMs);
+    // OpenCode performs another async database read before spawning the CLI.
+    // Recheck the authorization and pending notice after that read as well.
+    const expected=JSON.stringify(binding);
+    const canSend=()=>{
+      if(this.stopped)return false;
+      const p=Object.values(this.store.state.projects).find(p=>p.workspace===binding.workspace);
+      if(!p||p.paused||p.completedAt)return false;
+      if(!Object.values(p.bindings||{}).some(b=>b.armed&&JSON.stringify(b.wake)===expected))return false;
+      const starts=marker=>marker&&message.startsWith(`[${marker}]`);
+      if(message.startsWith('[TASK-DISPATCH-WAKE:'))return Object.values(p.tasks||{}).some(t=>{
+        const r=t.attempts?.at(-1);
+        return r&&!r.settled&&!r.claimedBy&&r.delivery&&JSON.stringify(p.bindings?.[bindingKey(r)]?.wake)===expected&&['TASK-DISPATCH-WAKE:'+r.id,r.wakeNotice?.reminder?.marker,r.wakeNotice?.manualReminder?.marker].some(starts);
+      });
+      if(message.startsWith('[TASK-DISPATCH-PLANNING:'))return p.planning?.state==='pending'&&!p.planning.needsAttention&&starts('TASK-DISPATCH-PLANNING:'+p.planning.id);
+      if(message.startsWith('[TASK-DISPATCH-SCOPE:')){const job=require('./scope-recovery.cjs').job(p);return !!job&&starts('TASK-DISPATCH-SCOPE:'+p.tasks[job.taskId].scopeAlert.id);}
+      if(message.startsWith('[TASK-DISPATCH-ATTENTION:')){const job=require('./brain-attention.cjs').job(p);return !!job&&starts('TASK-DISPATCH-ATTENTION:'+p.tasks[job.taskId].attention.id);}
+      if(message.startsWith('[TASK-DISPATCH-BATCH:')){const job=require('./stage-review.cjs').job(p);return !!job&&starts('TASK-DISPATCH-BATCH:'+(job.attemptId||job.alertId))&&!(job.kind==='stage_review'&&p.reviewStages[job.roundId].attempt?.claimedBy);}
+      return false;
+    };
+    return hostCall.send(adapter,{...binding,canSend},message,timeoutMs);
+  }
   // [AI-added] 2026-09-24 13:26: Verified host data may be reused by the continuation path only.
   async bind(identity,input,verifiedInfo) {
     this.desktop.assertBinding(identity);
@@ -44,11 +67,12 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
     if (provider === 'codearts' && input.model !== undefined && (typeof input.model !== 'string' || !/^[^\s/]+\/\S+$/.test(input.model))) throw Error('CodeArts model must be provider/model; omit it to preserve the session model');
     // [AI-added] 2026-09-15 18:56
     if (provider === 'qoder' && input.model !== undefined && (typeof input.model !== 'string' || !/^[^\s/]+\/\S+$/.test(input.model))) throw Error('Qoder model must be provider/model; omit it to preserve the session model');
+    if (provider === 'opencode' && input.model !== undefined && (typeof input.model !== 'string' || !/^[^\s/]+\/\S+$/.test(input.model))) throw Error('OpenCode model must be provider/model; omit it to preserve the session model');
     if (b.wake?.model && b.wake.model !== input.model) throw Error('Disable old wake binding before replacing model');
-    const candidate={provider,threadId:input.threadId,...(input.turnId?{turnId:input.turnId}:{}),...(input.model?{model:input.model}:{}),...(provider==='qoder'?{workspace:p.workspace}:{})};
+    const candidate={provider,threadId:input.threadId,...(input.turnId?{turnId:input.turnId}:{}),...(input.model?{model:input.model}:{}),...(['qoder','opencode'].includes(provider)?{workspace:p.workspace}:{})};
     // Previous implementation: const r=await hostCall.read(adapter,candidate,this.readTimeoutMs);
     // [AI-added] 2026-09-24 13:26: Direct wake-bind still performs its own host read.
-    const r=verifiedInfo || await hostCall.read(adapter,candidate,this.readTimeoutMs);
+    const r=verifiedInfo || await (provider==='opencode' ? hostCall.bounded('Host verify',()=>adapter.verify(candidate),this.readTimeoutMs) : hostCall.read(adapter,candidate,this.readTimeoutMs));
     if(r.thread?.id!==candidate.threadId||!r.thread.cwd||path.relative(p.workspace,r.thread.cwd)!=='')throw Error('Desktop thread workspace does not match project');
     this.desktop.assertBinding(identity);
     this.store.change(s=>{const q=s.projects[p.id].bindings[bindingKey(identity)];q.wake=candidate;q.armed=false;delete q.armedAt;});
@@ -157,7 +181,7 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
           const attemptedAt=new Date().toISOString();
           setFollowup({status:'sending',lastAttemptAt:attemptedAt,attempts:(followup.attempts||1)+1,error:null});
           try{
-            await hostCall.send(adapter,b.wake,`[${followup.marker}] task-dispatch 的任务 ${t.id} 已通知但仍未领取。请立即使用本会话已有凭据执行 desktop-client claim，核对 attemptId 后继续处理并 submit；之后 park。不要只回复文字或重复启动 wait。`,this.sendTimeoutMs);
+            await this.send(adapter,b.wake,`[${followup.marker}] task-dispatch 的任务 ${t.id} 已通知但仍未领取。请立即使用本会话已有凭据执行 desktop-client claim，核对 attemptId 后继续处理并 submit；之后 park。不要只回复文字或重复启动 wait。`,this.sendTimeoutMs);
             // The grace anchor stays on the first accepted send; resends never move it.
             setFollowup({status:'sent',at:followup.at||attemptedAt,lastAttemptAt:attemptedAt,error:null});update({claimStatus:'reminded',error:null});
           }catch(e){const repair=await this.repair(adapter,e,{projectId:p.id,taskId:t.id,reminder:true});setFollowup(sendFailure(e,repair));}
@@ -178,10 +202,10 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
         update({status:'sending',marker,at:new Date().toISOString(),error:null});
         try {
           // [AI-added] 2026-09-14 22:59
-          if((b.wake.provider||'codex')==='codex')await hostCall.send(adapter,b.wake,`[${marker}] task-dispatch 有待处理任务。项目 ${p.id}，任务 ${t.id}，角色 ${r.role}。请用本会话已有凭据执行 desktop-client claim 领取正式任务，处理并 submit；之后 park，无任务时结束回合。不要轮询、调用 wait 或直接读取 state.json。通知不等于任务已领取，先核对 claim 返回的 attemptId。`,this.sendTimeoutMs);
+          if((b.wake.provider||'codex')==='codex')await this.send(adapter,b.wake,`[${marker}] task-dispatch 有待处理任务。项目 ${p.id}，任务 ${t.id}，角色 ${r.role}。请用本会话已有凭据执行 desktop-client claim 领取正式任务，处理并 submit；之后 park，无任务时结束回合。不要轮询、调用 wait 或直接读取 state.json。通知不等于任务已领取，先核对 claim 返回的 attemptId。`,this.sendTimeoutMs);
           else
           // [AI-added] 2026-09-14 22:06
-          await hostCall.send(adapter,b.wake,`[${marker}] task-dispatch 有待处理任务。项目 ${p.id}，任务 ${t.id}，角色 ${r.role}。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 desktop-client claim 领取正式任务；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。处理并 submit；之后 park，无任务时结束回合。不要轮询、调用 wait 或直接读取 state.json。通知不等于任务已领取，先核对 claim 返回的 attemptId。`,this.sendTimeoutMs);
+          await this.send(adapter,b.wake,`[${marker}] task-dispatch 有待处理任务。项目 ${p.id}，任务 ${t.id}，角色 ${r.role}。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 desktop-client claim 领取正式任务；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。处理并 submit；之后 park，无任务时结束回合。不要轮询、调用 wait 或直接读取 state.json。通知不等于任务已领取，先核对 claim 返回的 attemptId。`,this.sendTimeoutMs);
           update({status:'sent',error:null});
         } catch(e){const repair=await this.repair(adapter,e,{projectId:p.id,taskId:t.id});update(sendFailure(e,repair));}
       }
@@ -221,10 +245,10 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
     update({status:'sending',marker,at:new Date().toISOString()});
     try{
       // [AI-added] 2026-09-14 22:59
-      if((b.wake.provider||'codex')==='codex')await hostCall.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 验收后尚有阶段收尾待办。请用已有凭据 claim，按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
+      if((b.wake.provider||'codex')==='codex')await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 验收后尚有阶段收尾待办。请用已有凭据 claim，按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
       else
       // [AI-added] 2026-09-14 22:06
-      await hostCall.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 验收后尚有阶段收尾待办。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 claim；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。领取后按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再实际执行 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
+      await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 验收后尚有阶段收尾待办。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 claim；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。领取后按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再实际执行 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
       update({status:'sent',error:null});
     }catch(e){const repair=await this.repair(adapter,e,{projectId});update(sendFailure(e,repair));}
   }
@@ -246,12 +270,12 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
     update({status:'sending',marker,at:new Date().toISOString()});
     // [AI-added] 2026-09-14 22:59
     if((b.wake.provider||'codex')==='codex'){
-      try{await hostCall.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 的任务 ${job.taskId} 越界纠正需要大脑处理。请用已有凭据 claim 读取 scope_attention，核对差异并说明阻塞后 scope-ack；不要扩大 worker 修改计划的权限。`,this.sendTimeoutMs);update({status:'sent',error:null});}
+      try{await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 的任务 ${job.taskId} 越界纠正需要大脑处理。请用已有凭据 claim 读取 scope_attention，核对差异并说明阻塞后 scope-ack；不要扩大 worker 修改计划的权限。`,this.sendTimeoutMs);update({status:'sent',error:null});}
       catch(e){const repair=await this.repair(adapter,e,{projectId});update(sendFailure(e,repair));}
       return;
     }
     // [AI-added] 2026-09-14 22:06
-    try{await hostCall.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 的任务 ${job.taskId} 越界纠正需要大脑处理。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 claim 读取 scope_attention；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。核对差异并说明阻塞后实际执行 scope-ack；不要扩大 worker 修改计划的权限。`,this.sendTimeoutMs);update({status:'sent',error:null});}
+    try{await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 的任务 ${job.taskId} 越界纠正需要大脑处理。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 claim 读取 scope_attention；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。核对差异并说明阻塞后实际执行 scope-ack；不要扩大 worker 修改计划的权限。`,this.sendTimeoutMs);update({status:'sent',error:null});}
     catch(e){const repair=await this.repair(adapter,e,{projectId});update(sendFailure(e,repair));}
   }
   // [AI-added] 2026-09-19: Blocked/uncertain settlements reach the brain through the same
@@ -274,12 +298,12 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
     update({status:'sending',marker,at:new Date().toISOString()});
     // [AI-added] 2026-09-14 22:59
     if((b.wake.provider||'codex')==='codex'){
-      try{await hostCall.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 的任务 ${job.taskId} 处于 ${q.kind} 状态，需要大脑处理。请用已有凭据 claim 读取 task_attention，核对状态并向用户说明阻塞原因，处置后执行 attention-ack；原因未核实前不要盲目重试。`,this.sendTimeoutMs);update({status:'sent',error:null});}
+      try{await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 的任务 ${job.taskId} 处于 ${q.kind} 状态，需要大脑处理。请用已有凭据 claim 读取 task_attention，核对状态并向用户说明阻塞原因，处置后执行 attention-ack；原因未核实前不要盲目重试。`,this.sendTimeoutMs);update({status:'sent',error:null});}
       catch(e){const repair=await this.repair(adapter,e,{projectId});update(sendFailure(e,repair));}
       return;
     }
     // [AI-added] 2026-09-14 22:06
-    try{await hostCall.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 的任务 ${job.taskId} 处于 ${q.kind} 状态，需要大脑处理。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 claim 读取 task_attention；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。核对状态并向用户说明阻塞原因，处置后实际执行 attention-ack；原因未核实前不要盲目重试。`,this.sendTimeoutMs);update({status:'sent',error:null});}
+    try{await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 的任务 ${job.taskId} 处于 ${q.kind} 状态，需要大脑处理。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 claim 读取 task_attention；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。核对状态并向用户说明阻塞原因，处置后实际执行 attention-ack；原因未核实前不要盲目重试。`,this.sendTimeoutMs);update({status:'sent',error:null});}
     catch(e){const repair=await this.repair(adapter,e,{projectId});update(sendFailure(e,repair));}
   }
   // [AI-added] 2026-09-22 10:20: One marker per shared review or batch attention; uncertain sends never replay.
@@ -298,7 +322,7 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
     if(['sending','uncertain'].includes(notice.status)){update({status:'uncertain',error:'批次通知送达不确定，请核对目标会话；不自动重发。'});return;}
     if(info.thread?.status?.type!=='idle'&&!(binding.wake.provider==='mimo'&&info.thread?.status?.type==='unknown'))return;
     update({status:'sending',at:new Date().toISOString()});
-    try{await hostCall.send(adapter,binding.wake,`[${marker}] 项目 ${projectId} 有 ${job.kind} 待办。立即调用终端工具，复用已有客户端、credential 和 data 路径实际执行 claim，并完成批次逐项审核或阻塞处置。不要仅展示命令；领取后按返回指令提交并 park。`,this.sendTimeoutMs);update({status:'sent',error:null});}catch(e){update(sendFailure(e,null));}
+    try{await this.send(adapter,binding.wake,`[${marker}] 项目 ${projectId} 有 ${job.kind} 待办。立即调用终端工具，复用已有客户端、credential 和 data 路径实际执行 claim，并完成批次逐项审核或阻塞处置。不要仅展示命令；领取后按返回指令提交并 park。`,this.sendTimeoutMs);update({status:'sent',error:null});}catch(e){update(sendFailure(e,null));}
   }
   async close(){this.stopped=true;await this.busy;}
 }

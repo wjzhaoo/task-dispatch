@@ -35,7 +35,7 @@ async function configure(wake, identity, input = {}) {
   }
   const providers = [selected];
   const results = await Promise.allSettled(providers.map(async provider => {
-    const candidate = {provider,threadId:binding.sessionId,...(input.turnId?{turnId:input.turnId}:{}),...(provider==='qoder'?{workspace:project.workspace}:{})};
+    const candidate = {provider,threadId:binding.sessionId,...(input.turnId?{turnId:input.turnId}:{}),...(['qoder','opencode'].includes(provider)?{workspace:project.workspace}:{})};
     // Previous implementation: every connect used a full read here and another full read in Wake.bind.
     // [AI-added] 2026-09-24 13:26: Verify identity once; MiMo can omit activity polling during setup.
     const adapter = wake.forProvider(provider);

@@ -225,7 +225,7 @@ test('management rebind invitation atomically replaces a stopped session and is 
  const old=desktop.attach({workspace:f.workspace,role:'brain',clientId:'brain-old',token:oldToken,sessionId:'session-old'});
  const invitation=await lifecycleCommand(f,{action:'rebind-invite',binding:'brain',clientId:old.clientId,confirmedStopped:true});
  assert.equal(invitation.ok,true);assert.equal(invitation.managedRebind,true);assert.match(invitation.text,/--managed-rebind/);
- assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','any']);assert.equal(invitation.provider,'any');
+ assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','opencode','any']);assert.equal(invitation.provider,'any');
  const next={workspace:f.workspace,role:'brain',clientId:'brain-new',token:crypto.randomBytes(32).toString('hex'),sessionId:'session-new',replaceClientId:old.clientId,recover:true,confirmedStopped:true,managedRebind:true,rebindInvitationId:invitation.invitationId};
  const attached=desktop.attach(next);assert.equal(attached.recovered,true);assert.throws(()=>desktop.authenticate(oldToken),/Invalid/);
  assert.equal(f.s.store.state.projects.project.rebindInvitations[invitation.invitationId].status,'completed');
@@ -248,11 +248,13 @@ test('rebind invitation emits one adapted prompt per host and defaults to the bo
  f.s.store.change(s=>{s.projects.project.bindings['worker:mimo1'].wake={provider:'mimo',threadId:'session-old'};});
  const invitation=await lifecycleCommand(f,{action:'rebind-invite',binding:'worker:mimo1',clientId:old.clientId});
  assert.equal(invitation.ok,true,JSON.stringify(invitation));
- assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','codearts','wait','any']);
+ assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','codearts','opencode','wait','any']);
  assert.equal(invitation.provider,'mimo');assert.equal(invitation.platformLabel,'MiMo');
  assert.match(invitation.commandTemplate,/--provider mimo --session-id <当前真实会话 ID> --role worker --worker-id mimo1 --capability strong/);
  assert.doesNotMatch(invitation.commandTemplate,/--recover/);
  const by=Object.fromEntries(invitation.platforms.map(x=>[x.provider,x]));
+ assert.ok(by.opencode.sessionIdRequired);assert.match(by.opencode.commandTemplate,/--provider opencode --session-id <当前真实会话 ID>/);
+ assert.match(by.opencode.text,/当前真实 ses_ 会话 ID/);
  assert.ok(by.codearts.sessionIdRequired);assert.match(by.codearts.commandTemplate,/--provider codearts --session-id <当前真实会话 ID>/);
  assert.ok(!by.qoder.sessionIdRequired);assert.doesNotMatch(by.qoder.commandTemplate,/session-id/);assert.match(by.qoder.commandTemplate,new RegExp('--invitation-id '+invitation.invitationId));
  assert.match(by.codex.text,/CODEX_THREAD_ID/);assert.doesNotMatch(by.codex.commandTemplate,/session-id/);
@@ -268,7 +270,7 @@ test('wait-only host names its own provider instead of the generic placeholder',
  f.s.store.change(s=>{s.projects.project.bindings['worker:z1'].continuation={mode:'wait',provider:'zcode'};});
  const invitation=await lifecycleCommand(f,{action:'rebind-invite',binding:'worker:z1',clientId:old.clientId});
  assert.equal(invitation.provider,'zcode');
- assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','codearts','zcode','any']);
+ assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','codearts','opencode','zcode','any']);
  assert.match(invitation.commandTemplate,/--provider zcode --role worker/);assert.doesNotMatch(invitation.commandTemplate,/session-id/);
 });
 // [AI-added] 2026-09-21

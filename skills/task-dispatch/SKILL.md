@@ -91,6 +91,8 @@ worker 的 blocked 回执和一切 blocked/uncertain 结算都会由服务登记
 
 Qoder/QoderCN 属于原会话唤醒平台：先 `node scripts/install.js qoder`（或 `qodercn`）安装技能、首次握手 Hook 与常驻 App Plugin 直接唤醒桥接，并重启 Qoder 一次。connect/rebind 必须显式传 `--provider qoder`；首次连接优先传邀请自带的 `--invitation-id`，也可传宿主真实 `--session-id`。成功返回 `parked:true` 即长期待命，不依赖 Stop Hook 轮询或监听租约；若返回 job 则立即处理。Qoder 不能静默降级为 wait。细节见 [Qoder 原会话接入](references/qoder.md)。
 
+OpenCode 2.x 支持 brain、reviewer 和 worker 原会话唤醒。接收端确认平台后，使用真实 `ses_...` 会话 ID；需要 Node.js 22.13+、可读会话数据库和官方 CLI。安装及接入时读取 [OpenCode 原会话接入](references/opencode.md)。
+
 若用户已配置 task-dispatch 本地服务，规划者将任务包映射为 `id/title/instructions/acceptance/allowedPaths/dependsOn`，通过已授权的管理端登记。替代旧阻塞任务时额外填写 `supersedes`（旧任务 ID 数组）与 `supersedeReason`；不得按任务名猜测替代关系。先添加前置任务；`allowedPaths` 使用相对文件名或以 `/` 结尾的目录，不使用通配符。服务代码在开发仓库 `runtime/`，配置与恢复说明在 `docs/runtime.md`；这些不随 Skill 复制安装，不能假定本机已存在或已启动。
 
 作为服务派发的执行员或审核员时，遵守宿主提供的项目、任务、尝试及角色绑定，最终返回宿主要求的 JSON。执行员不得自审通过；审核员不得修改候选。不得直接修改服务状态、调用管理接口替自己放行或另起后台代理。遇到中断不猜测完成，交给服务按回执恢复。普通手动交接仍沿用本 Skill 模板，不强制使用 runtime。
@@ -104,6 +106,6 @@ Qoder/QoderCN 属于原会话唤醒平台：先 `node scripts/install.js qoder`�
 
 ### 客户端自动选择续接方式
 
-当前客户端 connect/rebind 要求接收端显式传 `--provider <真实平台>`。每个 brain、reviewer、worker 接收端在首次连接或换绑前都必须先询问用户当前会话平台，由用户明确选择；不得根据模型、目录、环境变量或邀请来源猜测。用户未选择时停止连接，CLI 也会硬阻断缺失或 `auto` provider。brain/reviewer 仅可使用 codex、mimo、qoder；worker 可用合法 provider。codex、mimo、codearts 走 wake 并要求真实 session；qoder 首次连接可用当前邀请的一次性 ID 核实真实 session；其他 worker provider 快速进入 wait。brain connect 返回 `setup-peers` 时必须展示 reviewer 邀请；完成 staff 后逐条展示 worker 邀请，不能只回复等待。首次 resume 配置也必须显式 provider；已有 wake/continuation 才可省略并复用。具体见 references/desktop.md。
+当前客户端 connect/rebind 要求接收端显式传 `--provider <真实平台>`。每个 brain、reviewer、worker 接收端在首次连接或换绑前都必须先询问用户当前会话平台，由用户明确选择；不得根据模型、目录、环境变量或邀请来源猜测。用户未选择时停止连接，CLI 也会硬阻断缺失或 `auto` provider。brain/reviewer 可使用 codex、mimo、qoder、opencode；worker 可用合法 provider。codex、mimo、codearts、opencode 走 wake 并要求真实 session；qoder 首次连接可用当前邀请的一次性 ID 核实真实 session；其他 worker provider 快速进入 wait。brain connect 返回 `setup-peers` 时必须展示 reviewer 邀请；完成 staff 后逐条展示 worker 邀请，不能只回复等待。首次 resume 配置也必须显式 provider；已有 wake/continuation 才可省略并复用。具体见 references/desktop.md。
 
 brain 正常换绑使用 `rebind --role brain`。旧 brain 已永久不可用时，只有用户明确确认旧会话及后台任务均停止后，才可追加 `--recover --confirmed-stopped`；禁止模型自行确认。确认式恢复撤销旧凭据、替换遗留 pending handover，并把未结算 brain attempt 原样转交新 brain。worker/reviewer 不支持该参数，继续使用保守交接。

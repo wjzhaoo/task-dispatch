@@ -25,4 +25,7 @@ test('Qoder is registered under both product ids and exposes the direct bridge s
  assert.equal(typeof providers.forProvider('codex').send,'function');
  assert.equal(typeof providers.forProvider('mimo').send,'function');
  assert.equal(providers.forProvider('codearts'),providers.forProvider('codeartsdoer'));
+ const opencode=providers.forProvider('opencode');
+ assert.equal(opencode,providers.forProvider('open-code'));
+ for(const name of ['verify','read','send'])assert.equal(typeof opencode[name],'function');
 });
