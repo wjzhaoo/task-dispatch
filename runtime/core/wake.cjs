@@ -244,11 +244,16 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
     if(this.stopped||current.paused||current.completedAt||current.planning?.id!==q.id||current.planning.state!=='pending'||!current.bindings?.brain?.armed||JSON.stringify(current.bindings.brain.wake)!==JSON.stringify(b.wake)||Object.values(current.tasks).some(t=>['running','reviewing','uncertain'].includes(t.state)))return;
     update({status:'sending',marker,at:new Date().toISOString()});
     try{
+      const obligation=q.kind==='initial'?'用户已在 Web 管理端确认开始，现有初始规划待办':'验收后尚有阶段收尾待办';
+      if (p.goals) {
+        await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} ${obligation}，所属目标 ${q.goalId}。使用已有凭据实际 claim，按正式 planning 完成 stage-register、finish-goal 或 closeout（记录阻塞），随后 resume。沿用现有成员与开始授权；空队列保留待命。`,this.sendTimeoutMs);
+        update({status:'sent',error:null}); return;
+      }
       // [AI-added] 2026-09-14 22:59
-      if((b.wake.provider||'codex')==='codex')await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 验收后尚有阶段收尾待办。请用已有凭据 claim，按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
+      if((b.wake.provider||'codex')==='codex')await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} ${obligation}。请用已有凭据 claim，按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
       else
       // [AI-added] 2026-09-14 22:06
-      await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 验收后尚有阶段收尾待办。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 claim；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。领取后按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再实际执行 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
+      await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} ${obligation}。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 claim；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。领取后按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再实际执行 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
       update({status:'sent',error:null});
     }catch(e){const repair=await this.repair(adapter,e,{projectId});update(sendFailure(e,repair));}
   }

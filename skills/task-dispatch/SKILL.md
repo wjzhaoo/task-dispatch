@@ -7,9 +7,13 @@ description: 为游戏和应用开发实施强模型设计与审核、经济模�
 
 # Task Dispatch
 
-## 人工启动（实际工作默认）
+## 目标授权与启动
 
-实际工作与测试统一采用两阶段启动：连接阶段只登记 staffing、生成邀请、核对各端，不得 plan。计划内 worker 与小脑就绪后，等待用户在大脑会话明确发出开始指令，再执行 start-work --confirmed，成功后才 plan。connect 成功配置唤醒后自动 park，返回 parked:true 即待命，其他角色无需用户再次确认；大脑派单后同样实际 resume；无唤醒端接入后实际 wait --seconds 60 保持可领取，宿主工具超时至少 90 秒，不把空队列当完成。小脑必须就绪，不支持跳过初审。后续已授权任务、审核、返修与唤醒自动继续，不逐单要求人工确认。已结束项目重新打开后重新等待开始；服务重启或普通重连不重置已启动项目。服务只能校验大脑提交的明确确认，不能独立识别聊天中是否为真人发令，大脑不得自行代替用户确认。
+Web 创建目标返回 `peerSetupManagedBy: web`、`goals`、`activeGoalId` 与 `brief`。默认“大脑＋初审端＋一名执行员”，各端可同时 connect，大脑复用配置及绑定，不重复 staff、邀请或派生。用户点击「创建并开始」已明确授权，服务在全员就绪且轮到目标时投递 planning，不再要求重复开始；「仅保存」必须等用户明确开始才入队。同目录持续新增目标，逐个完成，活动期间不修改团队。用户已明确指定接收端平台时沿用，不重复询问。详见 [服务发现与接入](references/connection.md)。
+
+目标项目按 planning.goalId/brief 处理当前目标，任务与阶段自动关联当前 goalId，编号在项目内唯一。完成当前目标全部验收并通过阶段终审与结算后，实际执行 `finish-goal --goal <goalId> --summary <验收摘要>`，随后 `resume`；服务处理下个已授权目标，队列为空则待命。阻塞时保留当前目标并报告具体原因；不得用 finish-project 跳过目标。已有单目标契约和历史不改写，换会话仍显式改绑。
+
+非 Web 目标项目采用两阶段启动：连接阶段只登记 staffing、生成邀请、核对各端，不得 plan。计划内 worker 与小脑就绪后，等待用户在大脑会话明确发出开始指令，再执行 start-work --confirmed，成功后才 plan。connect 成功配置唤醒后自动 park，返回 parked:true 即待命，其他角色无需用户再次确认；大脑派单后同样实际 resume；无唤醒端接入后实际 wait --seconds 60 保持可领取，宿主工具超时至少 90 秒，不把空队列当完成。小脑必须就绪，不支持跳过初审。后续已授权任务、审核、返修与唤醒自动继续，不逐单要求人工确认。已结束项目重新打开后重新等待开始；服务重启或普通重连不重置已启动项目。服务只能校验大脑提交的明确确认，不能独立识别聊天中是否为真人发令，大脑不得自行代替用户确认。
 
 ```powershell
 node "<客户端脚本>" start-work --confirmed --credential "<大脑凭据>" --data "<服务目录>"
@@ -83,7 +87,7 @@ worker 的 blocked 回执和一切 blocked/uncertain 结算都会由服务登记
 
 ### 可选本地 runtime
 
-用户要求派发、新增执行端、断绑或换绑时，读取 [多执行员接入](references/workers.md)。所有实际工作默认先完成各端接入，用户只需在大脑会话说一次开始，由大脑核对就绪后 start-work，再派单；支持 wake 的平台实际 wake-bind/park，无唤醒平台任务提交后实际 wait，不能仅回复等待就结束。其他连接阶段按 [服务发现与接入](references/connection.md) 派生一个独立小脑 reviewer：所有阶段成员先逐项初审，全部通过后大脑对整合成果集中终审；未连接 reviewer 则阶段阻塞，不降级逐项大脑审核。已领取初审不以 heartbeat 续约，也不因暂态读取失败自动改派；确定停止时 reviewer 自己 detach，崩溃时由 brain 明确执行 `detach --role reviewer`。该操作撤销旧 reviewer 绑定并等待新 reviewer 恢复初审，绝不能根据超时擅自执行。派生需要宿主支持和已有用户授权，不得假装已连接。brain connect 后先评估本阶段所需模型类型、数量、职责及并发条件，复用现有合适 worker，再以 staff --file 登记并展示逐编号邀请；模型不会自行创建或假装关联另一个窗口。按任务的强模型等约束填写 workerId/requiredCapability，未匹配时明确等待接入。
+用户要求派发、新增执行端、断绑或换绑时，读取 [多执行员接入](references/workers.md)。Web 目标沿用页面的开始授权及团队；其他项目先完成各端接入，用户在大脑会话说一次开始，由大脑核对就绪后 start-work，再派单；支持 wake 的平台实际 wake-bind/park，无唤醒平台任务提交后实际 wait，不能仅回复等待就结束。其他连接阶段按 [服务发现与接入](references/connection.md) 派生一个独立小脑 reviewer：所有阶段成员先逐项初审，全部通过后大脑对整合成果集中终审；未连接 reviewer 则阶段阻塞，不降级逐项大脑审核。已领取初审不以 heartbeat 续约，也不因暂态读取失败自动改派；确定停止时 reviewer 自己 detach，崩溃时由 brain 明确执行 `detach --role reviewer`。该操作撤销旧 reviewer 绑定并等待新 reviewer 恢复初审，绝不能根据超时擅自执行。派生需要宿主支持和已有用户授权，不得假装已连接。非 Web 管理项目的 brain connect 后先评估本阶段所需模型类型、数量、职责及并发条件，复用现有合适 worker，再以 staff --file 登记并展示逐编号邀请；模型不会自行创建或假装关联另一个窗口。按任务的强模型等约束填写 workerId/requiredCapability，未匹配时明确等待接入。
 
 用户要求通过服务协作、派发任务或继续开发时，先读取 [服务发现与接入](references/connection.md)，默认当前会话为 brain、当前工作目录为项目，调用 connect 自动启动服务并创建或复用绑定，不要求用户提供可自动确定的目录或凭据。用户已指定 worker 身份时保留 worker，不切换角色。只规划时不接入、不提交。用户明确要求继续派发或开发时使用 connect --continue 重新打开已结束的同目录项目，不另造同目录项目。接入服务后以服务状态为唯一任务进度来源，本地计划只记录设计和说明，不能据聊天记录自行判定任务已通过。
 

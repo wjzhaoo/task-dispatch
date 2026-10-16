@@ -10,7 +10,7 @@ const wizard = require('./wizard.cjs');
 const { alive, atomic, read } = require('./core/storage.cjs');
 
 const json = (res, code, value, headers = {}) => { res.writeHead(code, { 'Content-Type':'application/json; charset=utf-8', 'Cache-Control':'no-store', ...headers }); res.end(JSON.stringify(value)); };
-async function body(req) { let text=''; for await (const chunk of req) { text+=chunk; if(Buffer.byteLength(text)>32768) throw Error('请求超过 32 KiB'); } return JSON.parse(text||'{}'); }
+async function body(req) { const chunks=[];let bytes=0;for await(const chunk of req){bytes+=chunk.length;if(bytes>32768)throw Error('请求超过 32 KiB');chunks.push(chunk);}return JSON.parse(Buffer.concat(chunks).toString('utf8')||'{}'); }
 function cookie(req) { return (req.headers.cookie||'').split(';').map(value=>value.trim()).find(value=>value.startsWith('td_catalog='))?.slice(11); }
 // [AI-added] 2026-09-21: Stopping a service affects every project sharing that data root, so the
 // home page guard reads the whole state file instead of the single card's workspace.
@@ -36,7 +36,7 @@ function projectView(options = {}) {
       const tasks=Object.values(project?.tasks||{}); taskCount=tasks.length; activeTaskCount=tasks.filter(task=>!require('./core/task-state.cjs').terminal(task)).length;
     } catch { /* Catalog availability is reported without exposing service state. */ }
     const online=registry.online(entry.dataRoot);
-    return { key:entry.key, projectId:project?.id||entry.projectId, workspace:entry.workspace, dataRoot:entry.dataRoot, workspaceExists:entry.workspaceExists,
+    return { key:entry.key, projectId:project?.id||entry.projectId, title:project?.title, workspace:entry.workspace, dataRoot:entry.dataRoot, workspaceExists:entry.workspaceExists,
       dataExists:entry.dataExists, online, taskCount, activeTaskCount, completed:!!project?.completedAt, paused:!!project?.paused,
       ...(online ? { ...serviceFacts(entry.dataRoot), serviceVersion: serviceVersion(entry.dataRoot) } : serviceFacts(entry.dataRoot)) };
   });
@@ -104,12 +104,13 @@ async function reuse({ stateFile, home, cacheRoot } = {}) {
 async function serve({port=0,registryOptions={},stateFile}={}) {
   const record=stateFile||(process.env.NODE_TEST_CONTEXT?null:consoleFile()),token=crypto.randomBytes(32).toString('hex');
   // [AI-added] 2026-09-19 00:35
-  const gatewaySessions=new Map(),activeStreams=new Set();
+  const gatewaySessions=new Map(),activeStreams=new Set(),gatewayLogins=new Map(),projectCreations=new Map();
   async function gatewaySession(key,refresh=false){
     const cached=gatewaySessions.get(key);
     if(!refresh&&cached&&cached.expiresAt>Date.now())return cached;
-    const session=await gatewayLogin(catalogEntry(key,registryOptions));
-    gatewaySessions.set(key,session);return session;
+    if(gatewayLogins.has(key))return gatewayLogins.get(key);
+    const pending=gatewayLogin(catalogEntry(key,registryOptions)).then(session=>{gatewaySessions.set(key,session);return session;}).finally(()=>gatewayLogins.delete(key));
+    gatewayLogins.set(key,pending);return pending;
   }
   async function gatewayFetch(key,apiPath,{method='GET',payload}={}){
     let lastError;
@@ -163,7 +164,7 @@ async function serve({port=0,registryOptions={},stateFile}={}) {
     catch{/* The upstream stream was aborted; the client close handler already ran. */}
     clearTimeout(timer);activeStreams.delete(upstream.body);try{res.end();}catch{}
   }
-  const tickets=new Map(),sessions=new Map(),assets={'/catalog/':'index.html','/catalog/app.js':'app.js','/catalog/style.css':'style.css','/catalog/task-board.mjs':'task-board.mjs'};
+  const tickets=new Map(),sessions=new Map(),assets={'/catalog/':'index.html','/catalog/app.js':'app.js','/catalog/style.css':'style.css','/catalog/task-board.mjs':'task-board.mjs','/catalog/project-setup.mjs':'project-setup.mjs'};
   const cleanup=setInterval(()=>{const now=Date.now();for(const[key,expires]of tickets)if(expires<now)tickets.delete(key);for(const[key,value]of sessions)if(value.expires<now)sessions.delete(key);},60000);cleanup.unref();
   const server=http.createServer(async(req,res)=>{
     const url=new URL(req.url,'http://127.0.0.1'),host=`127.0.0.1:${req.socket.localPort}`,origin=`http://${host}`;
@@ -191,6 +192,23 @@ async function serve({port=0,registryOptions={},stateFile}={}) {
       const session=sessions.get(cookie(req));if(!session||session.expires<Date.now())return json(res,401,{error:'请重新运行 web-console.bat'});
       if(req.method==='GET'&&url.pathname==='/catalog/api/session')return json(res,200,{csrf:session.csrf});
       if(req.method==='GET'&&url.pathname==='/catalog/api/projects')return json(res,200,{projects:projectView(registryOptions),observedAt:new Date().toISOString()});
+      if(req.method==='POST'&&url.pathname==='/catalog/api/projects'){
+        if(req.headers.origin!==origin||req.headers['x-csrf-token']!==session.csrf)return json(res,403,{error:'同源控制校验失败'});
+        const setup=require('./core/project-setup.cjs').validate(await body(req)),key=registry.keyOf(setup.workspace);
+        // Serialize setup for the same workspace only. Members connect independently afterwards.
+        const previous=projectCreations.get(key)||Promise.resolve();
+        const pending=previous.catch(()=>{}).then(async()=>{
+          const entry=registry.catalog(registryOptions).find(item=>registry.pathKey(item.workspace)===registry.pathKey(setup.workspace));
+          const roots=require('./core/data-root.cjs'),root=entry?.dataRoot||roots.projectDataRoot(setup.workspace);
+          roots.ensureProjectLayout(setup.workspace,root);wizard.initialize(root);
+          await wizard.start(root);
+          const result=await wizard.request(root,{action:'create-web-project',setup});
+          registry.register(root,[setup.workspace],registryOptions);
+          return {...result,key,workspace:setup.workspace};
+        });
+        projectCreations.set(key,pending);
+        try{return json(res,200,await pending);}finally{if(projectCreations.get(key)===pending)projectCreations.delete(key);}
+      }
       // [AI-added] 2026-09-21: per-project service lifecycle from the home page.
       if(req.method==='POST'&&url.pathname==='/catalog/api/service'){
         if(req.headers.origin!==origin||req.headers['x-csrf-token']!==session.csrf)return json(res,403,{error:'同源控制校验失败'});
@@ -227,7 +245,7 @@ async function serve({port=0,registryOptions={},stateFile}={}) {
       //   return json(res,200,await openProject((await body(req)).key,registryOptions));
       // }
       // [AI-added] 2026-09-19 00:35: same-origin gateway to the selected project service.
-      const gatewayMatch=url.pathname.match(/^\/catalog\/api\/p\/([^/]+)\/(ensure|overview|events|diagnostics|commands|stream)$/);
+      const gatewayMatch=url.pathname.match(/^\/catalog\/api\/p\/([^/]+)\/(ensure|overview|events|diagnostics|commands|stream|join-invite)$/);
       if(gatewayMatch){
         const[,key,action]=gatewayMatch;
         if(action==='ensure'){

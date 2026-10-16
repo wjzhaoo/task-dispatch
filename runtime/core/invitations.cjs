@@ -8,7 +8,7 @@ const {ROLE_PROVIDERS, WAKE_PROVIDERS, continuationMode} = require('./platforms.
 // [AI-added] 2026-09-17 09:42
 const SCHEMA_VERSION = 1;
 const DISPATCH_CONTEXT = '本邀请显式使用 $task-dispatch，由 task-dispatch runtime/client 生成，仅用于进入既有协作流程；不要把接入操作当作新的功能或修复请求，不要启动 flow-entry、flow-feature 或 flow-fix，不要另建计划或再次等待用户输入 1。';
-const CONTINUATION_GUIDE = '先核对宿主真实会话目录与项目一致。脚本只按接收端确认的 provider 固定选择 wake 或 wait，不探测其他平台；按返回 nextAction/nextInstruction 执行，缺项则补充真实信息，不能猜测或自行降级。空闲和提交后统一实际执行 resume --credential <本端凭据路径> --data <上述服务目录>，首次配置还要传同一 --provider。工具超时至少 90 秒，已有等待进程就续等同一进程。job 继续处理，parked:true 才结束当前回合；idle:true 不是完成，按授权再次 resume。连接成功返回 parked:true 即已自动待命，结束当前回合；其他角色无需确认开始。只有用户给大脑一次开始指令后，大脑执行 start-work --confirmed 和 plan；不得自行确认。大脑派单后同样实际 resume，不能只口头说等待。plan 只代表入队，dispatch.blocked 时必须报告原因。completed:true 才停止整个协作。';
+const CONTINUATION_GUIDE = '先核对宿主真实会话目录与项目一致。脚本只按接收端确认的 provider 固定选择 wake 或 wait，不探测其他平台；按返回 nextAction/nextInstruction 执行，缺项则补充真实信息，不能猜测或自行降级。空闲和提交后统一实际执行 resume --credential <本端凭据路径> --data <上述服务目录>，首次配置还要传同一 --provider。工具超时至少 90 秒，已有等待进程就续等同一进程。job 继续处理，parked:true 才结束当前回合；idle:true 不是完成，按授权再次 resume。连接成功返回 parked:true 即已自动待命，结束当前回合；其他角色无需确认开始。Web 目标沿用用户在页面提交的开始授权，领取正式 job 后处理当前目标；仅保存的目标不得自行开始。其他项目须用户给大脑开始指令后执行 start-work --confirmed 和 plan。不得自行确认。大脑派单后同样实际 resume，不能只口头说等待。plan 只代表入队，dispatch.blocked 时必须报告原因。completed:true 才停止整个协作。';
 const SESSION_REQUIREMENTS = Object.freeze({
   codex: '显式选择 codex 后可读取当前会话的 CODEX_THREAD_ID。',
   mimo: '必须使用宿主提供的当前真实 --session-id。',
@@ -126,4 +126,19 @@ function buildRebindInvitation({ role, workspace, dataRoot, clientPath, referenc
 
 // [AI-added] 2026-09-17 09:42
 // [AI-added] 2026-09-17 11:46
-module.exports = {SCHEMA_VERSION, SESSION_REQUIREMENTS, providerChoices, buildInvitation, buildRebindInvitation};
+function buildJoinInvitation(options) {
+  const base = buildInvitation(options);
+  const quote = value => "'" + value.replaceAll("'", process.platform === 'win32' ? "''" : "'\"'\"'") + "'";
+  const platforms = [...rebindPlatformOrder(options.role), 'any'].map(provider => {
+    const spec = rebindPlatformSpec(provider);
+    const session = spec.sessionIdRequired ? ' --session-id <当前真实会话 ID>' : '';
+    const handshake = provider === 'qoder' || provider === 'wait' ? ` --invitation-id ${base.invitationId}` : '';
+    const commandTemplate = `connect --provider ${spec.flag}${session} --role ${base.role}${base.role === 'worker' ? ` --worker-id ${base.workerId}${base.capability ? ` --capability ${base.capability}` : ''}` : ''}${handshake} --join-invitation ${base.invitationId} --workspace ${quote(base.workspace)} --data ${quote(base.data)}`;
+    const command = `node ${quote(base.client)} ${commandTemplate}`;
+    const text = `[TASK-DISPATCH-INVITE:${base.invitationId}] 使用 $task-dispatch 加入 Web 管理端的项目「${options.title || ''}」。角色：${base.role}${base.workerId ? ' / ' + base.workerId : ''}${base.capability ? '，能力要求：' + base.capability : ''}。${options.responsibilities ? '职责：' + options.responsibilities + '。' : ''}\n项目：${base.workspace}\n平台：${spec.label}。先确认本会话真实平台；用户已明确指定时直接复用，不重复提问，不猜测平台或会话 ID。${spec.hint}不能借用其他会话凭据。\n在该项目的真实会话中执行：\n${command}\n接入阶段只处理本角色配置。服务自动保存独立凭据并配置续接；parked:true 就结束本回合等待唤醒，无需额外 status、wake-bind、park。nextAction 提示缺项时仅补缺项；wait 型按回执执行 resume，工具超时至少 90 秒。大脑读取返回的 brief 和 staffing；所有邀请已由 Web 管理端提供，无需再次 staff 或生成其他角色邀请。用户点击「创建并开始」的目标已获授权，成员就绪且轮到时自动开始；「仅保存」目标等待用户明确开始，不重复索要已有授权。按正式 job 的 goalId 与 brief 处理当前目标，完成全部验收后由大脑执行 finish-goal --goal <goalId> --summary <验收摘要> 再 resume，空队列保留待命，不自行结束整个项目。接到正式 job 后按协议处理、submit，再实际 resume；completed:true 才结束协作。此提示词只用于未绑定成员，换人请使用管理端改绑邀请。`;
+    return { provider, label: spec.label, sessionIdRequired: spec.sessionIdRequired, sessionHint: spec.hint, commandTemplate, text };
+  });
+  const chosen = platforms.at(-1);
+  return { ...base, operation: 'connect', kind: 'join', platforms, provider: chosen.provider, commandTemplate: chosen.commandTemplate, text: chosen.text };
+}
+module.exports = {SCHEMA_VERSION, SESSION_REQUIREMENTS, providerChoices, buildInvitation, buildRebindInvitation, buildJoinInvitation};

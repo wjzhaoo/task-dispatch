@@ -345,6 +345,7 @@ button.danger:hover { background: var(--error-bg); }
   white-space: nowrap;
 }
 .tab:hover { background: transparent; color: var(--ink); }
+.tabs .add-goal { margin: 2px 0 6px auto; white-space: nowrap; align-self: center; }
 .tab.active { color: var(--green-ink); border-bottom-color: var(--green); }
 .tab .tab-count {
   margin-left: 6px;
@@ -592,6 +593,35 @@ td small { display: block; color: var(--muted-2); font-size: 10px; margin-top: 5
 .load-more:hover { background: var(--btn-hover); }
 
 /* Command dialog. */
+.setup-dialog { width: 760px; max-height: calc(100dvh - 40px); overflow-y: auto; }
+.setup-dialog textarea { display: block; width: 100%; resize: vertical; margin-top: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; line-height: 1.6; }
+.setup-fixed { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px; background: var(--green-soft); border-radius: 8px; font-size: 12px; }
+.setup-worker { display: grid; grid-template-columns: 1fr 1fr 2fr auto; align-items: end; gap: 10px; border-bottom: 1px solid var(--line); padding-bottom: 12px; }
+.setup-worker label { min-width: 0; margin-bottom: 0; }
+.setup-error { color: var(--error-ink); white-space: pre-wrap; }
+.setup-error:empty { display: none; }
+#setup-advanced { margin: 16px 0; }
+#setup-advanced > summary { cursor: pointer; font-size: 13px; padding: 10px 0; }
+#setup-advanced .panel-heading { padding: 12px 0; }
+.team-panel { margin-bottom: 20px; }
+.goals-panel { margin-bottom: 20px; }
+.goal-list { display: grid; gap: 12px; padding: 16px 22px; }
+.goal-card { border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+.goal-card.is-current { border-color: var(--green-node-border); background: var(--green-soft-2); }
+.goal-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.goal-heading h3 { margin: 0; overflow-wrap: anywhere; }
+.goal-card p { font-size: 12px; }
+.goal-card summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.goal-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.goal-actions:empty { display: none; }
+.team-panel > .task-objective, .team-panel > p.subtle { margin: 16px 22px; }
+.task-objective { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; line-height: 1.7; }
+.team-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 16px 22px; }
+.team-member { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+.team-member h3, .team-member p { margin: 0; overflow-wrap: anywhere; }
+.team-member p { color: var(--muted); font-size: 12px; }
+.team-member button { margin-top: auto; }
+@media (max-width: 640px) { .setup-worker { grid-template-columns: 1fr 1fr; } .setup-worker label:nth-child(3) { grid-column: 1 / -1; } .team-grid { grid-template-columns: 1fr; } }
 dialog {
   width: 490px;
   max-width: calc(100vw - 30px);

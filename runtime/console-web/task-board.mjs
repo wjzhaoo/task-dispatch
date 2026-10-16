@@ -47,7 +47,7 @@ export function buildBoard(project = {}) {
 export function matchesTask(task, board, options = {}) {
   const query = (options.query || '').trim().toLocaleLowerCase();
   const text = [task.id, task.title, task.stageId, task.workerId].join(' ').toLocaleLowerCase();
-  return (!query || text.includes(query)) && (!options.stage || task.stageId === options.stage) &&
+  return (!query || text.includes(query)) && (!options.goal || task.goalId === options.goal) && (!options.stage || task.stageId === options.stage) &&
     (options.filter === 'active' ? !terminal(task) : options.filter === 'brain' ? !terminal(task) && board.reviews.get(task.id)?.key !== 'draft' : options.filter === 'attention' ? ['blocked','uncertain'].includes(task.state) : true);
 }
 
@@ -57,6 +57,7 @@ export const boardMarkup = `
   <section class="panel task-board"><div class="panel-heading"><div><h2>任务全景</h2><p>查看前后依赖，追踪每项任务的审核去向</p></div><span id="task-count" class="subtle" aria-live="polite"></span></div>
   <div class="board-toolbar"><div class="board-views" role="group" aria-label="任务视图"><button type="button" data-board-view="graph" aria-pressed="true">依赖图</button><button type="button" data-board-view="list" aria-pressed="false">任务列表</button></div>
   <input id="task-search" type="search" placeholder="搜索任务、编号或执行员" aria-label="搜索任务">
+  <select id="task-goal" aria-label="筛选目标"><option value="">全部目标</option></select>
   <select id="task-stage" aria-label="筛选阶段"><option value="">全部阶段</option></select>
   <select id="task-filter" aria-label="任务显示范围"><option value="all">全部任务</option><option value="active">未完成任务</option><option value="brain">待大脑终审</option><option value="attention">阻塞与异常</option></select>
   <button type="button" id="task-clear">清除筛选</button></div>
@@ -73,6 +74,12 @@ function button(text, action, cls) { const b = el('button', text, cls); b.type =
 
 export function renderBoard(root, project, options, actions) {
   const get = id => root.querySelector('#' + id), board = buildBoard(project);
+  const goalSelect = get('task-goal'), savedGoal = goalSelect.value;
+  goalSelect.replaceChildren(el('option', '全部目标')); goalSelect.firstChild.value = '';
+  for (const goal of project.goals || []) { const option = el('option', goal.title); option.value = goal.id; goalSelect.append(option); }
+  goalSelect.value = (project.goals || []).some(goal => goal.id === savedGoal) ? savedGoal : '';
+  goalSelect.hidden = !project.goals?.length;
+  options = { ...options, goal: goalSelect.value };
   const { counts } = board, stageSelect = get('task-stage'), savedStage = stageSelect.value;
   stageSelect.replaceChildren(el('option', '全部阶段'));
   stageSelect.firstChild.value = '';

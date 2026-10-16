@@ -36,6 +36,8 @@ function apply(admin, input) {
   if (admin.monitor.wake.busy) throw Error('服务正在检查或投递唤醒，请稍后重试');
   if (Object.keys(p.handovers || {}).length) throw Error('项目有待完成的会话交接，请先处理交接');
   const affected = input.action === 'reset-task' ? (input.resetDependents ? view.affectedTasks.map(t => t.id) : [input.taskId]) : Object.keys(p.tasks);
+  const goalIds = [...new Set(affected.map(key => p.tasks[key].goalId).filter(Boolean))];
+  if (input.action === 'reset-task' && p.goals && (goalIds.length !== 1 || (p.activeGoalId && p.activeGoalId !== goalIds[0]))) throw Error('只能重置同一目标的任务；另一个目标活动期间不能重置历史目标');
   // [AI-added] 2026-09-22 10:20: Reset every frozen member together, preserving stage audit.
   const batches=Object.values(p.reviewStages||{}).filter(b=>(b.reviewTaskIds||b.members.map(m=>m.taskId)).some(k=>affected.includes(k)));
   if(input.action==='reset-task'&&batches.some(b=>(b.reviewTaskIds||b.members.map(m=>m.taskId)).some(k=>!affected.includes(k))))throw Error('Stage reset must include every original and repair task in the functional stage');
@@ -46,7 +48,7 @@ function apply(admin, input) {
   const at = new Date().toISOString(), resetId = id();
   if (input.action === 'reset-task') {
     // Save the old records before clearing them. These are audit evidence, never replayed.
-    atomic(path.join(store.root, 'task-resets', resetId + '.json'), { resetId, at, projectId: p.id, reason: input.reason, tasks: affected.map(k => p.tasks[k]),reviewStages:batches });
+    atomic(path.join(store.root, 'task-resets', resetId + '.json'), { resetId, at, projectId: p.id, reason: input.reason, tasks: affected.map(k => p.tasks[k]),reviewStages:batches, ...(p.goals ? { goal: p.goals[goalIds[0]] } : {}) });
   }
   store.change(s => {
     const q = s.projects[p.id];
@@ -62,7 +64,7 @@ function apply(admin, input) {
       delete q.archivedAt; q.paused = true;
     } else {
       for(const b of batches){const v=q.reviewStages[b.id];v.state='reset';if(v.attempt){v.attempt.settled=true;v.attempt.settledAt=at;v.attempt.outcome='reset';}}
-      const keep = ['id','title','instructions','acceptance','allowedPaths','dependsOn','validationProfile'];
+      const keep = ['id','goalId','title','instructions','acceptance','allowedPaths','dependsOn','validationProfile'];
       for (const key of affected) {
         const old = q.tasks[key];
         const definition = Object.fromEntries(keep.filter(k => old[k] !== undefined).map(k => [k, old[k]]));
@@ -74,6 +76,12 @@ function apply(admin, input) {
       if (q.planning && (q.planning.acceptedTaskIds || []).some(k => targets.has(k))) delete q.planning;
       q.planningHistory = (q.planningHistory || []).map(h => ({ ...h, acceptedTaskIds: (h.acceptedTaskIds || []).filter(k => !targets.has(k)) })).filter(h => h.acceptedTaskIds.length);
       delete q.completedAt; q.paused = true;
+      if (q.goals) {
+        const goal = q.goals[goalIds[0]];
+        goal.state = 'active'; delete goal.completedAt; delete goal.summary; delete goal.blockedReason;
+        q.activeGoalId = goal.id; q.goalQueue = q.goalQueue.filter(key => key !== goal.id);
+        q.startup = { ...q.startup, state: 'started', goalId: goal.id };
+      }
       for (const b of Object.values(q.bindings || {})) { b.armed = false; delete b.armedAt; }
     }
     store.event(s, input.action.replaceAll('-', '_'), { projectId: p.id, taskId: input.taskId, reason: input.reason, summary: `${input.reason}；影响任务：${affected.join(', ') || '无'}`, affectedTasks: affected, ...(input.action === 'reset-task' ? { resetId } : {}) });

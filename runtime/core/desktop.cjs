@@ -8,8 +8,8 @@ const { parseResult } = require('./contracts.cjs');
 const {workerId:validateWorkerId,bindingKey,capabilities:validateCapabilities,matches} = require('./bindings.cjs');
 const attempts = require('./attempts.cjs');
 class Desktop {
-  constructor(dispatcher) { this.d = dispatcher; this.store = dispatcher.store; }
-  attach({ workspace, role, clientId, token, sessionId, workerId, capabilities, replaceClientId, recover, confirmedStopped, managedRebind, rebindInvitationId }) {
+  constructor(dispatcher) { this.d = dispatcher; this.store = dispatcher.store; dispatcher.desktop = this; }
+  attach({ workspace, role, clientId, token, sessionId, workerId, capabilities, replaceClientId, recover, confirmedStopped, managedRebind, rebindInvitationId, joinInvitationId }) {
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId.trim() || sessionId.length > 200)) throw Error('Invalid sessionId');
     if (!['brain', 'worker', 'reviewer'].includes(role)) throw Error('Role must be brain, worker or reviewer');
     // [AI-added] 2026-09-16 21:34
@@ -23,6 +23,11 @@ class Desktop {
     if (typeof clientId !== 'string' || !/^[a-zA-Z0-9_-]{8,80}$/.test(clientId)) throw Error('Invalid clientId');
     const dir = plainDirectory(workspace);
     let p = Object.values(this.store.state.projects).find(p => p.workspace === dir);
+    if (joinInvitationId) {
+      if (!p?.webSetup || require('./project-setup.cjs').joinId(p, key) !== joinInvitationId) throw Error('首次接入邀请无效，或目标成员已变化');
+      if (p.bindings?.[key] && p.bindings[key].clientId !== clientId) throw Error('该成员已加入；首次邀请不能替换现有会话，请使用改绑邀请');
+      if (replaceClientId || managedRebind) throw Error('首次接入邀请不能用于改绑');
+    }
     if (!p) {
       const projectId = desktopProjectId(dir);
       this.d.addProject({ id: projectId, workspace: dir, mode: 'desktop' });
@@ -187,13 +192,13 @@ class Desktop {
       if (!r.claimedBy) this.store.change(s => { const a=s.projects[p.id].tasks[t.id].attempts.at(-1);a.claimedBy = identity.clientId;a.claimedAt = new Date().toISOString(); });
       if (p.bindings?.[bindingKey(identity)]?.armed) this.store.change(s => { const b=s.projects[p.id].bindings[bindingKey(identity)];b.armed=false;delete b.armedAt; });
       const wakeHint = p.bindings?.[bindingKey(identity)]?.wake ? '\n\n此会话已启用自动唤醒：上文中提交后 wait 的要求改为调用 park。park 返回 job 就继续处理；返回 parked:true 就结束当前回合，不调用 wait 或轮询状态。' : '';
-      return { projectId: p.id, taskId: t.id, attemptId: r.id, role: r.role, workerId: r.workerId, artifactId: r.artifactId, cwd: r.delivery.cwd, prompt: r.delivery.prompt + wakeHint };
+      return { projectId: p.id, goalId: t.goalId, taskId: t.id, attemptId: r.id, role: r.role, workerId: r.workerId, artifactId: r.artifactId, cwd: r.delivery.cwd, prompt: r.delivery.prompt + wakeHint };
     }
     if(identity.role==='brain'){
       const current=this.store.state.projects[p.id];
       // [AI-added] 2026-09-14 22:53
       const withParkHint=job=>current.bindings?.brain?.wake
-        ? {...job,prompt:job.prompt+'\n\n自动唤醒后续步骤：实际调用终端工具执行本待办要求的 closeout 或 scope-ack，成功后必须使用本会话已有客户端、credential 和 data 路径实际执行 park。不得只展示命令。park 返回 job 时继续处理；返回 parked:true 时结束当前回合，不调用 wait 或轮询。返回 completed:true 时结束回合。若操作失败或缺少权限，说明具体阻塞，不声称已挂起。'}
+        ? {...job,prompt:job.prompt+'\n\n自动唤醒后续步骤：实际调用终端工具执行本待办要求的 '+(job.kind==='planning'?(current.goals?'stage-register（提交完整计划）、finish-goal（完成当前目标）或 closeout（记录具体阻塞）':'stage-register（提交完整计划）或 closeout（记录具体阻塞）'):'closeout 或 scope-ack')+'，成功后必须使用本会话已有客户端、credential 和 data 路径实际执行 park。不得只展示命令。park 返回 job 时继续处理；返回 parked:true 时结束当前回合，不调用 wait 或轮询。返回 completed:true 时结束回合。若操作失败或缺少权限，说明具体阻塞，不声称已挂起。'}
         : job;
       const scope=require('./scope-recovery.cjs').job(current);
       // Previous implementation: if(scope)return scope;
@@ -232,13 +237,14 @@ class Desktop {
       reviewStages:require('./stage-review.cjs').summary(p),
       handoverPending:!!p.handovers?.[bindingKey(identity)],
       staffing:p.staffing||null, executionMode:'serial-shared-workspace',
+      ...(p.webSetup ? { brief: require('./goals.cjs').brief(p), peerSetupManagedBy: 'web', ...require('./goals.cjs').summary(p) } : {}),
       planning:p.planning || null,
       startup:require('./startup.cjs').status(p),
       workers:Object.entries(p.bindings||{}).filter(([k])=>!['brain','reviewer'].includes(k)).map(([key,b])=>({workerId:key==='worker'?'default':key.slice(7),sessionId:b.sessionId,capabilities:b.capabilities||[]})),
       reviewerOnline:require('./pre-review.cjs').online(this.d,p),
       connections:Object.entries(p.bindings||{}).map(([key,b])=>({binding:key,sessionId:b.sessionId,wakeEnabled:!!b.wake,provider:b.wake?.provider||b.provider||b.continuation?.provider||null,continuationError:b.continuationError||null,armed:!!b.armed,armedAt:b.armedAt||null,wakeState:b.armed?'standby_authorized':b.wake?'not_parked':'unconfigured'})),
       boundRoles: Object.keys(p.bindings || {}),
-      tasks: Object.values(p.tasks).map(t => ({ id: t.id, title: t.title, state: t.state, dependsOn: t.dependsOn || [], supersedes:t.supersedes||[],resolution:t.resolution||null,contractRevision:t.contractRevision||1,stageId:t.stageId,roundId:t.roundId,stageHeld:!!t.stageHeld,
+      tasks: Object.values(p.tasks).map(t => ({ id: t.id, goalId: t.goalId, title: t.title, state: t.state, dependsOn: t.dependsOn || [], supersedes:t.supersedes||[],resolution:t.resolution||null,contractRevision:t.contractRevision||1,stageId:t.stageId,roundId:t.roundId,stageHeld:!!t.stageHeld,
         error: t.error || null, scopeReturns:t.scopeReturns||0,scopeRecoveryRequested:!!t.scopeRecoveryRequested,scopeRecoveryPaths:t.scopeRecovery?.targets.map(x=>x.path),scopeAlert:t.scopeAlert||null, attention:t.attention||null, workerId:t.workerId||'default',plannedWorkerId:t.plannedWorkerId,currentWorkerId:t.currentWorkerId,plannedRequiredCapability:t.plannedRequiredCapability,attemptCounts:attempts.counts(t),maxAttempts:t.maxAttempts,budgetExhausted:attempts.exhausted(t),requiredCapability:t.requiredCapability,waitingForWorker:t.state==='ready'&&!matches(p,t) })) };
   }
   finishProject(identity) {
@@ -249,13 +255,14 @@ class Desktop {
     if(planningId)require('./brain-activities.cjs').autoEnd(this,identity,'planning:'+planningId);
     return this.completion(identity);
   }
+  finishGoal(identity, input) { return require('./goals.cjs').finish(this, identity, input); }
   nextStep(identity, task) {
     const p=this.store.state.projects[identity.projectId];
     // [AI-added] 2026-09-22 09:20: A saved receipt is not yet an accepted settlement.
     if(this.d.pendingSettlements.size)return {nextAction:'attention',nextInstruction:'回执结算遇到存储错误，服务已暂停派发并有界恢复；查看 status.storageRecovery，不要重新执行任务或创建新 attempt。'};
     if(p.completedAt)return {completed:true,nextAction:'stop',nextInstruction:'整个项目已结束，结束回合，不再 wait/park。'};
     if(p.paused || ['blocked','uncertain'].includes(task?.state) || (['ready','review_ready'].includes(task?.state) && attempts.exhausted(task)))return {nextAction:'attention',nextInstruction:'项目暂停、任务阻塞或尝试额度耗尽。报告实际原因，不声称已完成，不循环重试。'};
-    if(identity.role==='brain' && p.planning?.state==='pending')return {nextAction:'claim',nextInstruction:'实际调用 claim 领取阶段收尾待办并处理；全部任务已通过则按已有授权调用管理端结束项目，不能虚构下一任务。'};
+    if(identity.role==='brain' && p.planning?.state==='pending')return {nextAction:'claim',nextInstruction:p.goals?'实际调用 claim 领取当前目标的规划或收尾；达到验收要求后 finish-goal --goal <当前目标 ID> --summary <验收摘要>，不要结束整个项目。':'实际调用 claim 领取阶段收尾待办并处理；全部任务已通过则按已有授权调用管理端结束项目，不能虚构下一任务。'};
     if(p.bindings?.[bindingKey(identity)]?.wake)return {nextAction:'park',nextInstruction:'实际调用 park。返回 job 继续处理；只有 parked:true 或 completed:true 才结束回合。不要 wait，不把 submit 成功当作已挂起。'};
     return {nextAction:'wait',nextInstruction:'本端未启用唤醒。持续协作期间提交后实际调用 wait --seconds 60，宿主超时至少留出额外 30 秒；有进程会话 ID 就续等同一进程。idle:true 不是完成，按授权续等；completed:true 才结束。不能只说等待后直接结束，也不能重复启动 wait。'};
   }
@@ -314,6 +321,8 @@ class Desktop {
     require('./startup.cjs').assertStarted(this.store.state.projects[identity.projectId]);
     const old = this.store.state.projects[identity.projectId].tasks[task.id];
     if (old) {
+      const p = this.store.state.projects[identity.projectId];
+      if (p.goals && old.goalId !== require('./goals.cjs').taskGoal(p, task.goalId)) throw Error('任务编号已用于其他目标，请使用当前目标前缀的新编号');
       for (const k of ['title','instructions','acceptance','allowedPaths']) if (JSON.stringify(old[k]) !== JSON.stringify(task[k])) throw Error('Conflicting task id');
       if (JSON.stringify(old.dependsOn) !== JSON.stringify(task.dependsOn || [])) throw Error('Conflicting dependencies');
       if (JSON.stringify(old.supersedes||[]) !== JSON.stringify(task.supersedes||[]) || (old.supersedeReason||null)!==(task.supersedeReason||null)) throw Error('Conflicting replacement relationship');
@@ -332,15 +341,9 @@ class Desktop {
   staff(identity,input) {
     this.assertBinding(identity);
     if(identity.role!=='brain')throw Error('Only brain can assess staffing');
-    const v=input.staffing;
-    if(!v||typeof v.rationale!=='string'||!v.rationale.trim()||!Array.isArray(v.workers)||v.workers.length>20)throw Error('Staffing requires rationale and up to 20 workers');
-    const seen=new Set();
-    const workers=v.workers.map(w=>{
-      const workerId=validateWorkerId(w.workerId),capability=validateWorkerId(w.capability);
-      if(seen.has(workerId)||typeof w.responsibilities!=='string'||!w.responsibilities.trim())throw Error('Unique worker ids and responsibilities required');
-      seen.add(workerId);return {workerId,capability,responsibilities:w.responsibilities};
-    });
-    const staffing={rationale:v.rationale,workers,concurrencyRequested:v.concurrencyRequested===true,executionMode:'serial-shared-workspace'};
+    const p = this.store.state.projects[identity.projectId];
+    if (p.goals) return require('./project-setup.cjs').configureTeam(this, p.id, input.staffing?.workers);
+    const staffing=require('./bindings.cjs').staffing(input.staffing);
     this.store.change(s=>{s.projects[identity.projectId].staffing=staffing;this.store.event(s,'staffing_assessed',{projectId:identity.projectId,...staffing});});
     return {ok:true,staffing};
   }

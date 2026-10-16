@@ -32,6 +32,7 @@ async function serve(root, { adapterFactory, wakeAdapter, port = 0, logger = () 
     if (result.error) dispatcher.registryError = result.error;
   };
   const desktop = new Desktop(dispatcher);
+  require('./core/goals.cjs').migrate(store);
   // [AI-added] 2026-09-15 18:56
 /* Previous implementation:
 const wake = new (require('./core/wake.cjs').Wake)(desktop, wakeAdapter || new (require('./adapters/mimo-wake.cjs').WakeProviders)());
@@ -86,6 +87,7 @@ const wake = new (require('./core/wake.cjs').Wake)(desktop, wakeAdapter || new (
           // [AI-added] 2026-09-22 09:20: Authenticated, non-mutating attempt inspection.
           if (v.action === 'preflight') return reply(200, desktop.preflight(identity,v));
         if (v.action === 'finish-project') return reply(200, desktop.finishProject(identity));
+        if (v.action === 'finish-goal') return reply(200, desktop.finishGoal(identity, v));
         if (v.action === 'scope-ack') {const result=require('./core/scope-recovery.cjs').acknowledge(desktop,identity,v);require('./core/brain-activities.cjs').autoEnd(desktop,identity,'scope:'+v.alertId);return reply(200,result);}
         if (v.action === 'attention-ack') return reply(200,require('./core/brain-attention.cjs').acknowledge(desktop,identity,v));
         if (v.action === 'claim') return reply(200, desktop.completion(identity) || {job:desktop.claim(identity)});
@@ -132,6 +134,7 @@ const wake = new (require('./core/wake.cjs').Wake)(desktop, wakeAdapter || new (
       for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 1024 * 1024) throw Error('Request too large'); }
       const v = JSON.parse(body);
       switch (v.action) {
+        case 'create-web-project': { const result = require('./core/project-setup.cjs').create(dispatcher, v.setup); syncRegistry(); return reply(200, result); }
         case 'add-project': dispatcher.addProject(v.project); syncRegistry(); break;
         case 'attach-desktop': { const result = desktop.attach(v); syncRegistry(); return reply(200, result); }
         case 'add-task': dispatcher.addTask(v.projectId, v.task); break;

@@ -53,7 +53,7 @@ class Dispatcher {
         delete s.deletedProjects[deletedId];
       }
       for (const p of Object.values(s.projects)) if (overlaps(p.workspace, workspace)) throw Error('Overlapping project workspaces');
-      s.projects[projectId] = { id: projectId, workspace, mode: 'desktop', brain: input.brain, worker: input.worker, maxTurns, projectBudgetEnabled:maxTurns!==null, attemptPolicyVersion:1, turns: 0, paused: false, tasks: {} };
+      s.projects[projectId] = { id: projectId, workspace, mode: 'desktop', brain: input.brain, worker: input.worker, maxTurns, projectBudgetEnabled:maxTurns!==null, attemptPolicyVersion:1, turns: 0, paused: false, tasks: {}, ...(input.webSetup ? require('./project-setup.cjs').fields(input.webSetup) : {}) };
       if(input.mode==='desktop')s.projects[projectId].startup={state:'waiting'};
       this.store.event(s, 'project_registered', { projectId });
     });
@@ -69,6 +69,7 @@ class Dispatcher {
     if (!Array.isArray(deps)) throw Error('dependsOn must be an array');
     this.store.change(s => {
       const p = s.projects[projectId]; if (!p) throw Error('Unknown project');
+      const goalId = require('./goals.cjs').taskGoal(p, input.goalId);
       // [AI-added] 2026-09-24 14:02: Check named deliverables against workspace ignore rules.
       const excluded = require('./snapshot.cjs').excludedTaskPaths(input.allowedPaths, p.snapshotPolicy, p.workspace);
       if (excluded.length) throw Error('Task allowedPaths overlap snapshot-excluded temporary paths: ' + excluded.join(', ') + '. Move deliverables outside tmp/ or configure a dedicated reviewed directory.');
@@ -80,6 +81,7 @@ class Dispatcher {
       if (p.tasks[input.id] || deps.some(d => !p.tasks[d] || d === input.id)) throw Error('Duplicate task or missing dependency (add prerequisites first)');
       for (const targetId of supersedes) {
         const target = p.tasks[targetId];
+        if (goalId && target?.goalId !== goalId) throw Error('修复任务不能替代其他目标的执行任务');
         if (!target || target.state !== 'blocked') throw Error('supersedes requires an existing blocked task: ' + targetId);
         if ((target.attempts || []).some(attempt => !attempt.settled)) throw Error('Cannot supersede a task with an unsettled attempt: ' + targetId);
         if (taskReferences(p, targetId, input.id, 'supersedes')) throw Error('supersedes relationship would create a cycle: ' + targetId);
@@ -87,13 +89,14 @@ class Dispatcher {
         if (deps.includes(targetId) || deps.some(dep => taskReferences(p, dep, targetId))) throw Error('Replacement task cannot depend on the blocked task it supersedes: ' + targetId);
       }
       p.tasks[input.id] = { id: input.id, title: input.title, instructions: input.instructions, acceptance: input.acceptance, allowedPaths: input.allowedPaths, dependsOn: deps,
+        ...(goalId ? { goalId } : {}),
         ...(supersedes.length ? { supersedes, supersedeReason: input.supersedeReason.trim() } : {}), contractRevision: 1,
         state: 'ready', repairs: 0, sessions: {}, attempts: [], findings: [] };
       p.tasks[input.id].maxAttempts=maxAttempts;
       if(input.workerId!==undefined)p.tasks[input.id].workerId=input.workerId;
       if(input.requiredCapability!==undefined)p.tasks[input.id].requiredCapability=input.requiredCapability;
       if (input.validationProfile) p.tasks[input.id].validationProfile = input.validationProfile;
-      this.store.event(s, 'task_created', { projectId, taskId: input.id });
+      this.store.event(s, 'task_created', { projectId, goalId, taskId: input.id });
     });
   }
   pause(projectId, paused) {
@@ -106,8 +109,9 @@ class Dispatcher {
       const p = s.projects[projectId]; if (!p) throw Error('Unknown project');
       if (reopen) { if(p.completedAt&&p.mode==='desktop')p.startup={state:'waiting'};delete p.completedAt; }
       else {
+        if (p.goals && Object.values(p.goals).some(goal => !require('./goals.cjs').ended(goal))) throw Error('还有未完成目标；请使用 finish-goal 完成活动目标，或取消尚未开始的目标');
         const tasks=Object.values(p.tasks);
-        if (require('./stage-review.cjs').active(p) || require('./stage-review.cjs').unresolved(p) || !tasks.length || tasks.some(t => !taskState.terminal(t))) throw Error('Finish requires a nonempty queue with every task accepted or resolved by an accepted replacement');
+        if (require('./stage-review.cjs').active(p) || require('./stage-review.cjs').unresolved(p) || (!tasks.length && !Object.keys(p.goals || {}).length) || tasks.some(t => !taskState.terminal(t))) throw Error('Finish requires a nonempty queue with every task accepted or resolved by an accepted replacement');
         p.completedAt ||= new Date().toISOString();
         if (p.planning) {
           for(const activity of Object.values(p.brainActivities||{}))if(activity.source==='planning:'+p.planning.id&&!activity.settledAt){activity.settledAt=p.completedAt;activity.settled=true;this.store.event(s,'brain_activity_ended',{projectId,activityId:activity.id});}
@@ -246,6 +250,7 @@ class Dispatcher {
     this.store.change(s => {
       const p = s.projects[projectId], t = p?.tasks[taskId];
       if (!t || t.state !== 'ready' || t.attempts.length || p.completedAt || p.archivedAt) throw Error('Only an unstarted ready task can be revised; create a replacement task after execution starts');
+      if (p.goals && (require('./goals.cjs').taskGoal(p, input.goalId) !== t.goalId)) throw Error('只能修订当前目标的执行任务');
       if (deps.some(dep => !p.tasks[dep] || dep === taskId || taskReferences(p,dep,taskId))) throw Error('Revision has a missing, self or cyclic dependency');
       if(t.roundId&&deps.some(dep=>!require('./stage-review.cjs').dependencyReady(p,t,dep)&&p.tasks[dep].stageId!==t.stageId))throw Error('Revised stage dependency must be inside the stage or already accepted');
       if (input.validationProfile !== undefined && !Object.hasOwn(p.reviewProfiles || {}, input.validationProfile)) throw Error('Unknown approved validation profile');
@@ -254,6 +259,7 @@ class Dispatcher {
       if (excluded.length) throw Error('Task allowedPaths overlap snapshot-excluded temporary paths: ' + excluded.join(', '));
       for (const targetId of supersedes) {
         const target = p.tasks[targetId];
+        if (p.goals && target?.goalId !== t.goalId) throw Error('修复任务不能替代其他目标的执行任务');
         if (!target || target.state !== 'blocked') throw Error('supersedes requires an existing blocked task: ' + targetId);
         if ((target.attempts || []).some(attempt => !attempt.settled)) throw Error('Cannot supersede a task with an unsettled attempt: ' + targetId);
         if (taskReferences(p, targetId, taskId, 'supersedes')) throw Error('supersedes relationship would create a cycle: ' + targetId);
@@ -460,6 +466,7 @@ class Dispatcher {
     this.retrySettlements();
     if(this.pendingSettlements.size)return;
     if (this.storageBlocked) return;
+    for (const p of Object.values(this.store.state.projects)) require('./goals.cjs').reconcile(this, p.id);
     for (const p of Object.values(this.store.state.projects)) {
       if (p.archivedAt) continue;
       require('./pre-review.cjs').reconcile(this,p);
@@ -481,7 +488,7 @@ class Dispatcher {
       // An uncertain former writer may still be alive; lock the entire workspace.
       if (Object.values(p.tasks).some(t => t.state === 'uncertain')) continue;
       const liveProject=this.store.state.projects[p.id];
-      const task = Object.values(liveProject.tasks).find(t => !t.stageHeld && (!batchGate||t.roundId===batchGate.batch.id) && !attempts.exhausted(t) && ['ready', 'review_ready'].includes(t.state) && (p.mode!=='desktop'||t.state==='review_ready'||matches(liveProject,t)) && t.dependsOn.every(d => require('./stage-review.cjs').dependencyReady(liveProject,t,d)));
+      const task = Object.values(liveProject.tasks).find(t => (!liveProject.goals || t.goalId === liveProject.activeGoalId) && !t.stageHeld && (!batchGate||t.roundId===batchGate.batch.id) && !attempts.exhausted(t) && ['ready', 'review_ready'].includes(t.state) && (p.mode!=='desktop'||t.state==='review_ready'||matches(liveProject,t)) && t.dependsOn.every(d => require('./stage-review.cjs').dependencyReady(liveProject,t,d)));
       if (!task) continue;
       if (task.state==='ready' && !task.scopeRecovery && this.store.state.projects[p.id].planning) continue;
       if (attempts.projectExhausted(p)) { this.pause(p.id, true); continue; }

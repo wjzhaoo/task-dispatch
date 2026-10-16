@@ -23,6 +23,7 @@ function resolve(project, taskId, replacementTaskId, reason, actor = 'brain') {
     return { duplicate: true, task };
   }
   if (task.state !== 'blocked') throw Error('Only a blocked task can be resolved by a replacement');
+  if (project.goals && (task.goalId !== replacement.goalId || require('./goals.cjs').taskGoal(project, task.goalId) !== task.goalId)) throw Error('替代任务必须属于当前同一目标');
   if ((task.attempts || []).some(attempt => !attempt.settled)) throw Error('Blocked task still has an unsettled attempt');
   const resolvedAt = new Date().toISOString();
   task.resolution = {

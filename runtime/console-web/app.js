@@ -1,15 +1,17 @@
 import { boardMarkup, buildBoard, renderBoard, matchesTask } from './task-board.mjs';
+import { openCreateTask, openTeamSettings, renderTeam } from './project-setup.mjs';
 // [AI-added] 2026-09-19 00:25: Unified single-port console SPA. Home view renders the system project catalog; project view talks to the owning service through the catalog gateway (/catalog/api/p/<key>/*). Text-only rendering; authenticated same-origin monitoring and controls.
 const $ = id => document.getElementById(id);
 let csrf = null, ctx = null, homeTimer = null, homeProjects = [];
 const labels = { brain:'大脑',worker:'执行员',reviewer:'初审端',ready:'待执行',running:'执行中',review_ready:'待审核',reviewing:'审核中',accepted:'已通过',resolved:'已由后续任务解决',blocked:'阻塞',uncertain:'需核实',settled:'已结算',claimed:'已领取',prepared:'已派发',pending:'等待重试',sent:'已送达',sending:'发送中',armed:'已获待命授权',not_parked:'未 park',unconfigured:'未配置',unknown:'未知',recent:'最近有通信',unreachable:'不可达',idle:'空闲',active:'活动',busy:'忙碌',listening:'监听有效',ended:'会话结束',paused:'已暂停',completed:'已完成',waiting:'等待启动',started:'已启动',wait:'阻塞等待',claim_stalled:'领取停滞',wake_reminder_requested:'再次提醒',service_started:'服务启动',service_stopping:'服务停止',desktop_request:'端请求',connection_state:'连接变化',task_state:'任务变化',attempt_state:'执行阶段',wake_state:'唤醒变化',host_observation:'宿主观测',operator_started:'管理操作开始',operator_completed:'管理操作结果',project_state:'项目变化',desktop_attached:'端已绑定',desktop_detached:'端已解绑',attempt_prepared:'任务已派发',worker_submitted:'执行员已提交',review_decision:'审核结果',task_resolved:'任务已由替代任务解决',task_revised:'任务契约已修订',planning_state:'收尾状态',project_registered:'项目登记',task_created:'任务登记',work_started:'开始协作',rebind_invitation_created:'改绑邀请已创建',rebind_invitation_claimed:'改绑邀请已领取',rebind_invitation_completed:'改绑邀请已完成',rebind_invitation_cancelled:'改绑邀请已取消',rebind_invitation_expired:'改绑邀请已过期',archive_project:'归档项目',restore_project:'恢复归档项目',delete_project:'永久删除项目',reset_task:'完全重置任务' };
 const label = x => labels[x] || x || '—';
+Object.assign(labels, { goal_created:'目标已创建', goal_queued:'目标已排队', goal_started:'目标已开始', goal_completed:'目标已完成', goal_cancelled:'目标已取消', goal_state:'目标状态', queued:'排队中', cancelled:'已取消', draft:'待开始' });
 // [AI-added] 2026-09-21 09:38: Resolved historical failures are terminal but remain distinct from accepted work.
 const terminalTask = task => ['accepted', 'resolved'].includes(task?.state);
 const time = x => x ? new Date(x).toLocaleTimeString('zh-CN', { hour12: false }) : '未观测';
 const fullTime = x => x ? new Date(x).toLocaleString('zh-CN', { hour12: false }) : '未观测';
 const baseName = workspace => String(workspace || '').split(/[\\/]/).filter(Boolean).at(-1) || '';
-const name = p => baseName(p.workspace) || p.id || '未命名项目';
+const name = p => p.title || baseName(p.workspace) || p.id || '未命名项目';
 function node(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
 function badge(text, kind = '') { return node('span', text, 'badge ' + kind); }
 function banner(text) { $('banner').hidden = !text; $('banner').textContent = text || ''; }
@@ -93,6 +95,9 @@ function showHome() {
   const titleWrap = node('div');
   titleWrap.append(node('div', 'PROJECT CATALOG', 'eyebrow'), node('h1', '项目目录'), node('p', '系统缓存中的项目目录表；项目接入或任务变化后自动出现，每 2 秒刷新。'));
   head.append(titleWrap);
+  const create = node('button', '创建目标', 'primary'); create.type = 'button';
+  create.onclick = () => openCreateTask({ api: capi, projects: homeProjects, onCreated: goalCreated });
+  head.append(create);
   const strip = node('section', undefined, 'summary-strip');
   for (const [id, labelText] of [['h-count', '已登记项目'], ['h-online', '服务运行中'], ['h-active', '未完成待办'], ['h-observed', '最近刷新']]) {
     const stat = node('div', undefined, 'stat');
@@ -105,7 +110,7 @@ function showHome() {
   const invalid = node('details', undefined, 'invalid-home'); invalid.id = 'invalid-home'; invalid.hidden = true;
   invalid.innerHTML = '<summary><span class="invalid-title">无效项目（<span id="invalid-count">0</span>）</span><span class="subtle">工作目录已不存在，仅剩目录索引记录</span><button type="button" id="cleanup-open" class="danger">清理无效项目</button></summary><div id="invalid-cards" class="cards"></div>';
   const empty = node('section', undefined, 'empty-home'); empty.id = 'empty-home'; empty.hidden = true;
-  empty.append(node('div', 'T', 'mark'), node('h2', '暂无项目'), node('p', '可以保持此页面打开。在项目会话中执行 start.bat connect 后，项目会自动出现在这里。'));
+  empty.append(node('div', 'T', 'mark'), node('h2', '暂无项目'), node('p', '点击「创建目标」，填写目标和项目目录后邀请成员加入。同一目录复用项目与成员，目标按顺序执行。'));
   $('view').append(head, strip, cards, invalid, empty);
   $('cleanup-open').onclick = e => { e.preventDefault(); e.stopPropagation(); openCleanup(); };
   loadHome();
@@ -188,7 +193,7 @@ function card(project) {
   const stateText = !project.workspaceExists ? '工作目录不存在' : !project.dataExists ? '项目缓存不可用' : project.completed ? '已完成' : project.paused ? '已暂停' : project.online ? '运行中' : '已登记';
   const bad = !project.workspaceExists || !project.dataExists;
   article.append(badge(stateText, bad ? 'error card-state' : 'muted card-state'));
-  article.append(node('h3', baseName(project.workspace) || project.projectId || '未命名项目'));
+  article.append(node('h3', name(project)));
   article.append(node('code', project.workspace));
   const outdated = project.online && consoleVersion && project.serviceVersion && project.serviceVersion !== consoleVersion;
   article.append(node('p', `任务 ${project.taskCount} · 未完成 ${project.activeTaskCount} · ${project.online ? `服务运行中 · v${project.serviceVersion || '未知'}` : '服务未运行'}`, 'card-meta'));
@@ -234,6 +239,9 @@ function showProject(key) {
     b.onclick = () => switchTab(id);
     tabs.append(b);
   }
+  const addGoal = node('button', '新增目标', 'primary add-goal'); addGoal.type = 'button'; addGoal.id = 'add-goal'; addGoal.disabled = true;
+  addGoal.onclick = () => openCreateTask({ api: capi, workspace: currentProject().workspace, existing: true, onCreated: goalCreated });
+  tabs.append(addGoal);
   const overviewPanel = node('section', undefined, 'tab-panel'); overviewPanel.id = 'tab-overview';
   overviewPanel.innerHTML = '<div class="stats" id="stats"></div><section class="panel"><div class="panel-heading"><div><h2>连接与交接</h2><p>会话身份、宿主观测与工作状态；点击行查看详情</p></div><span id="observed" class="subtle"></span></div><div id="topology" class="topology"></div><div class="table-scroll"><table><thead><tr><th>端 / 角色</th><th>通信证据</th><th>待命授权 / 实时通道</th><th>当前工作</th><th>最近观测</th></tr></thead><tbody id="connections"></tbody></table></div><div id="empty-connections" class="empty" hidden>尚无接入端。请在各平台会话执行 connect；接入后将在这里显示。</div><div id="connection-detail" class="detail-inline" hidden></div></section><section class="panel"><div class="panel-heading"><div><h2>需要关注</h2><p>异常与待处理事项；点击定位到任务或连接</p></div></div><div id="alerts"></div></section>';
   const tasksPanel = node('section', undefined, 'tab-panel'); tasksPanel.id = 'tab-tasks'; tasksPanel.hidden = true;
@@ -243,8 +251,9 @@ function showProject(key) {
   view.append(back, head, tabs, overviewPanel, tasksPanel, eventsPanel);
   $('task-filter').onchange = () => renderTasks();
   $('task-stage').onchange = () => renderTasks();
+  $('task-goal').onchange = () => renderTasks();
   $('task-search').oninput = () => renderTasks();
-  $('task-clear').onclick = () => { $('task-filter').value = 'all'; $('task-stage').value = ''; $('task-search').value = ''; renderTasks(); };
+  $('task-clear').onclick = () => { $('task-filter').value = 'all'; $('task-stage').value = ''; $('task-goal').value = ''; $('task-search').value = ''; renderTasks(); };
   document.querySelectorAll('[data-board-view]').forEach(b => b.onclick = () => { ctx.boardView = b.dataset.boardView; renderTasks(); });
   $('pause-events').onclick = () => { ctx.paused = !ctx.paused; ctx.pending = 0; $('pause-events').textContent = ctx.paused ? '恢复实时' : '暂停滚动'; if (!ctx.paused) renderEvents(); };
   $('filter-events').onclick = () => loadEvents();
@@ -287,6 +296,10 @@ async function refresh() {
   ctx.connected = true;
   live(true);
   renderProject();
+}
+async function goalCreated(result) {
+  if (ctx?.key === result.key) await refresh();
+  else location.hash = `#/p/${result.key}`;
 }
 function renderStatus() {
   const cluster = $('status-cluster');
@@ -333,6 +346,28 @@ function renderProject() {
   const snapshot = ctx?.snapshot;
   if (!snapshot) return;
   const p = currentProject();
+  if (p) $('p-name').textContent = name(p);
+  $('add-goal').disabled = !p || !!p.archivedAt || !!p.readOnly;
+  renderTeam(p, {
+    onInvite: async (project, member) => {
+      try { showInvitation(await papi('join-invite?' + new URLSearchParams({ projectId: project.id, binding: member.binding }))); }
+      catch (error) { banner(error.message); }
+    },
+    onGoalAction: async (project, goal, action) => {
+      const snapshot = await papi('overview');
+      const result = await papi('commands', { method: 'POST', body: JSON.stringify({ commandId: crypto.randomUUID(), instanceId: snapshot.instanceId, revision: snapshot.revision, projectId: project.id, goalId: goal.id, action, confirmed: true }) });
+      if (!result.ok) throw Error(result.error);
+      await refresh();
+    },
+    onConfigure: project => {
+      const { instanceId, revision } = ctx.snapshot;
+      openTeamSettings({ project, onSave: async workers => {
+        const result = await papi('commands', { method: 'POST', body: JSON.stringify({ commandId: crypto.randomUUID(), instanceId, revision, projectId: project.id, action: 'configure-team', workers }) });
+        if (!result.ok) throw Error(result.error);
+        await refresh();
+      } });
+    }
+  });
   renderStatus();
   renderHealth();
   $('revision').textContent = `revision ${snapshot.revision} · 事件 ${snapshot.cursor}`;
@@ -424,7 +459,7 @@ function taskActions(t) {
   return actions;
 }
 function boardOptions() {
-  return { view:ctx.boardView || 'graph', query:$('task-search').value, stage:$('task-stage').value, filter:$('task-filter').value, selected:ctx.selected?.kind === 'task' ? ctx.selected.id : null };
+  return { view:ctx.boardView || 'graph', query:$('task-search').value, goal:$('task-goal').value, stage:$('task-stage').value, filter:$('task-filter').value, selected:ctx.selected?.kind === 'task' ? ctx.selected.id : null };
 }
 function renderTasks() {
   if (!$('tasks')) return;
@@ -441,7 +476,7 @@ function renderTaskDetail() {
   const t = currentProject()?.tasks.find(t => t.id === sel.id);
   if (!t) { box.hidden = false; box.replaceChildren(node('p', '该任务已移除。')); return; }
   box.hidden = false;
-  box.replaceChildren(node('h3', `${t.id} · ${(t.stageHeld?'初审通过，等待阶段终审':label(t.state))}`), detailRows([['任务', t.title], ['契约版本', t.contractRevision || 1], ['依赖', t.dependsOn.join('、') || '无'],
+  box.replaceChildren(node('h3', `${t.id} · ${(t.stageHeld?'初审通过，等待阶段终审':label(t.state))}`), detailRows([['任务', t.title], ['所属目标', currentProject()?.goals?.find(goal => goal.id === t.goalId)?.title || t.goalId || '旧项目'], ['契约版本', t.contractRevision || 1], ['依赖', t.dependsOn.join('、') || '无'],
     ['替代目标', (t.supersedes || []).join('、') || '无'], ['解决依据', t.resolution ? `${t.resolution.replacementTaskId}：${t.resolution.reason}` : '无'],
     ['大脑处置', t.attention && !t.attention.acknowledged ? '待大脑领取并处理' : ['blocked','uncertain'].includes(t.state) ? '通知已确认，任务仍需正式处置' : '无'], ['当前错误', t.error || '无']]));
   box.append(taskActions(t));
@@ -544,7 +579,7 @@ function commandTargets() {
 }
 function impact() {
   const action = $('action').value;
-  const descriptions = { pause: '暂停只阻止后续调度，当前回合继续。', resume: '继续项目调度，可能立即派发已排队任务。', retry: '重试会重新排队；uncertain 状态必须先核实旧执行进程停止。', 'rebind-invite': '生成 30 分钟一次性改绑邀请，并按 Codex、MiMo、Qoder、CodeArts、OpenCode 或等待型平台给出对应提示词；不勾选停止确认时安全等待旧端结算，勾选后会转移合法的在途所有权。', 'rebind-cancel': '取消尚未完成的改绑邀请，不改变当前绑定。', detach: '解绑可能终止审核所有权；在途执行受服务保护，不能强制移除。', stop: '停止整个服务，所有管理台连接断开；执行中任务可能需要核实。重启需返回项目目录重新进入。', 'cleanup-apply': '仅执行最近清理预览中的目录清理，请先核对预览结果。', 'wake-retry': '仅加速检查明确可重试的 pending 通知；不重发 sent 或 uncertain 通知。', 'wake-remind': '为当前未领取 attempt 补充一次待命授权并发送独立提醒；必须填写原因，送达不确定时禁止执行。', 'finish-project': '仅允许结束所有任务已通过或由已通过替代任务解决的项目，等待端将退出。' };
+  const descriptions = { pause: '暂停只阻止后续调度，当前回合继续。', resume: '继续项目调度，可能立即派发已排队任务。', retry: '重试会重新排队；uncertain 状态必须先核实旧执行进程停止。', 'rebind-invite': '生成 30 分钟一次性改绑邀请，并按 Codex、MiMo、Qoder、CodeArts、OpenCode 或等待型平台给出对应提示词；不勾选停止确认时安全等待旧端结算，勾选后会转移合法的在途所有权。', 'rebind-cancel': '取消尚未完成的改绑邀请，不改变当前绑定。', detach: '解绑可能终止审核所有权；在途执行受服务保护，不能强制移除。', stop: '停止整个服务，所有管理台连接断开；执行中任务可能需要核实。重启需返回项目目录重新进入。', 'cleanup-apply': '仅执行最近清理预览中的目录清理，请先核对预览结果。', 'wake-retry': '仅加速检查明确可重试的 pending 通知；不重发 sent 或 uncertain 通知。', 'wake-remind': '为当前未领取 attempt 补充一次待命授权并发送独立提醒；必须填写原因，送达不确定时禁止执行。', 'finish-project': '所有目标必须完成或取消，且任务已通过或由通过的替代任务解决；结束整个项目后等待端将退出。' };
   if (lifecycleActions[action]) {
     const p = ctx.commandSnapshot?.projects.find(p => p.id === $('command-project').value);
     $('impact').textContent = `项目 ID：${p?.id || '—'}。` + ({ 'archive-project': '默认隐藏并暂停项目，保留所有历史。', 'restore-project': '恢复后保持暂停，核对后再继续。', 'delete-project': '永久删除调度记录并撤销连接；保留审计、源工程及磁盘产物。', 'reset-task': '清空执行、审核、唤醒、产物关联和次数，额度恢复 30。保留任务定义、旧记录审计及源文件。项目会暂停；已有执行的下游任务必须级联重置。' }[action]);
@@ -589,7 +624,9 @@ function renderInvitationVariant() {
 }
 function showInvitation(result) {
   invitationResult = result;
-  $('invitation-meta').textContent = `邀请 ${result.invitationId} · 30 分钟内有效 · 目标：${result.role === 'worker' ? '执行员' + (result.workerId ? ' ' + result.workerId : '') : result.role === 'reviewer' ? '初审端' : '大脑'} · ${result.recover ? '确认恢复（将转移在途所有权）' : '安全交接（旧端有在途任务时等待结算）'}`;
+  $('invitation-dialog').querySelector('h2').textContent = result.kind === 'join' ? '成员加入邀请' : '改绑提示词已生成';
+  const target = result.role === 'worker' ? '执行员 ' + result.workerId : result.role === 'reviewer' ? '初审端' : '大脑';
+  $('invitation-meta').textContent = result.kind === 'join' ? `首次接入 · ${target} · 选择接收会话平台后复制；各成员可同时加入` : `邀请 ${result.invitationId} · 30 分钟内有效 · 目标：${target} · ${result.recover ? '确认恢复（将转移在途所有权）' : '安全交接（旧端有在途任务时等待结算）'}`;
   fillOptions('invitation-platform', result.platforms.map(item => [item.provider, item.label + (item.sessionIdRequired ? ' · 需要 --session-id' : '')]));
   $('invitation-platform').value = result.provider;
   renderInvitationVariant();
@@ -606,10 +643,14 @@ function wireCommandDialog() {
   $('invitation-done').onclick = () => $('invitation-dialog').close();
   $('copy-invitation').onclick = async () => {
     const box = $('invitation-text');
-    try { await navigator.clipboard.writeText(box.value); }
-    catch { box.select(); document.execCommand('copy'); }
-    $('copy-invitation').textContent = '已复制';
-    setTimeout(() => { $('copy-invitation').textContent = '复制提示词'; }, 1500);
+    let copied = false, timer;
+    try {
+      await Promise.race([navigator.clipboard.writeText(box.value), new Promise((_, reject) => { timer = setTimeout(() => reject(Error('clipboard timeout')), 1000); })]);
+      copied = true;
+    } catch { box.focus(); box.select(); copied = document.execCommand('copy'); }
+    finally { clearTimeout(timer); }
+    $('copy-invitation').textContent = copied ? '已复制' : '已选中，请按 Ctrl+C';
+    if (copied) setTimeout(() => { $('copy-invitation').textContent = '复制提示词'; }, 1500);
   };
   $('lifecycle-preview').onclick = async () => {
     try {

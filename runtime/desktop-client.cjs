@@ -37,6 +37,8 @@ async function main() {
 后续操作使用连接结果中的凭据文件：
   start.bat status --credential "凭据文件"
   start.bat resume --credential "凭据文件"
+  start.bat start-goal --goal GOAL_ID --confirmed --credential "大脑凭据文件"
+  start.bat finish-goal --goal GOAL_ID --summary "验收结果" --credential "大脑凭据文件"
   start.bat finish-project --credential "大脑凭据文件"
   start.bat retry --task TASK --reason "原因" --credential "大脑凭据文件"
   start.bat resolve-task --task OLD --replacement NEW --reason "已由替代任务解决" --credential "大脑凭据文件"
@@ -125,7 +127,8 @@ connect/rebind 必须显式传真实 --provider。wake 平台还必须核实真�
     let credential = fs.existsSync(file) ? read(file) : { clientId: newClientId(), token: crypto.randomBytes(32).toString('hex'), role, workspace, data: root, ...(role==='worker'?{workerId:selectedWorker,capabilities:capability?[capability]:[]}:{}) };
     if (credential.role !== role || credential.workspace !== workspace || credential.data !== root) throw Error('Credential already belongs to a different role/workspace/service');
     if (role==='worker' && (credential.workerId||'default')!==selectedWorker) throw Error('Credential belongs to another worker');
-    const currentBinding = connecting ? Object.values((await request(root)).projects).find(p=>path.relative(p.workspace,workspace)==='')?.bindings?.[bindingKey({role,workerId:selectedWorker})] : undefined;
+    const connectingProject = connecting ? Object.values((await request(root)).projects).find(p=>path.relative(p.workspace,workspace)==='') : undefined;
+    const currentBinding = connectingProject?.bindings?.[bindingKey({role,workerId:selectedWorker})];
     const ownerSession=currentBinding?.sessionId||currentBinding?.wake?.threadId;
     if(connecting && currentBinding && ownerSession===sessionId && currentBinding.clientId!==credential.clientId) {
       const descriptor=path.join(root,'connections',currentBinding.clientId+'.json');
@@ -137,6 +140,7 @@ connect/rebind 必须显式传真实 --provider。wake 平台还必须核实真�
       }
     }
     if(connecting && currentBinding && ownerSession!==sessionId) {
+      if (connectingProject.webSetup && !rebinding) throw Error('该成员已加入；connect 和首次邀请不能替换现有会话，请使用 rebind 或管理端改绑邀请');
       if(role==='worker')rebinding=true;
       if(!rebinding)throw Error('Role belongs to another session; use the brain handover invitation');
     }
@@ -160,6 +164,7 @@ connect/rebind 必须显式传真实 --provider。wake 平台还必须核实真�
       ...(recoveryRequested?{recover:true,confirmedStopped:true}:{}),
       // [AI-added] 2026-09-17 11:46
       ...(managedRebind?{managedRebind:true,rebindInvitationId:connectInvitationId}:{}),
+      ...(connecting&&option('--join-invitation')?{joinInvitationId:option('--join-invitation')}:{}),
       ...(rebinding && currentBinding && currentBinding.clientId!==credential.clientId ? {replaceClientId:currentBinding.clientId}:{}) });
     if (connecting && sessionId) credential.sessionId = sessionId;
     credential = { ...credential, ...registered }; atomic(file, credential);
@@ -181,19 +186,19 @@ connect/rebind 必须显式传真实 --provider。wake 平台还必须核实真�
       if (continuation.nextAction === 'park') {
         const standby = await call(root,credential,{action:'park'});
         continuation = {...continuation,...standby,nextAction:standby.job?'work':standby.parked?'standby':continuation.nextAction,
-          nextInstruction:standby.job?'立即处理返回的正式 job，完成后 submit 和 resume。':'已自动待命；结束当前回合。只有大脑接收用户的开始指令并执行 start-work --confirmed，其他角色无需确认。'};
+          nextInstruction:standby.job?'立即处理返回的正式 job，完成后 submit 和 resume。':status.peerSetupManagedBy==='web'?'已自动待命；结束当前回合。已获用户授权的目标将在成员就绪且轮到时自动开始；仅保存的目标等待明确开始。已有团队及邀请直接复用。':'已自动待命；结束当前回合。只有大脑接收用户的开始指令并执行 start-work --confirmed，其他角色无需确认。'};
       }
       status = await call(root,credential,{action:'status'});
       // [AI-added] 2026-09-16 18:11
-      const workerInvites=workers.map(w=>({...w,...createInvitation('worker',workspace,root,{workerId:w.workerId,capability:w.capability})}));
+      const workerInvites=status.peerSetupManagedBy==='web'?[]:workers.map(w=>({...w,...createInvitation('worker',workspace,root,{workerId:w.workerId,capability:w.capability})}));
       const connectedWorkers=new Map((status.workers||[]).map(w=>[w.workerId,w]));
       const workerConnectRequired=!status.staffing||workers.length===0||workers.some(w=>!connectedWorkers.has(w.workerId));
-      const peerSetupRequired=role==='brain'&&(!status.reviewerOnline||workerConnectRequired);
+      const peerSetupRequired=role==='brain'&&status.peerSetupManagedBy!=='web'&&(!status.reviewerOnline||workerConnectRequired);
       const effectiveContinuation=peerSetupRequired&&continuation.nextAction==='standby'?{
         ...continuation,continuationNextAction:continuation.nextAction,nextAction:'setup-peers',
         nextInstruction:'连接尚未完成：必须向用户展示 reviewerInvite.text；若 staffingRequired 先完成 staff，再逐条展示 workerInvites[].text。大脑不要询问或选择其他角色的平台；邀请接收端会在自己的会话中确认真实平台。不能只回复等待或把 parked:true 当作角色配置已完成。'
       }:continuation;
-      console.log(JSON.stringify({attached:true,client:path.resolve(__filename),data:root,credential:path.resolve(file),recovered:registered.recovered===true,recoveredAttempts:registered.recoveredAttempts||[],...status,continuation,...effectiveContinuation,...(role==='brain'?{
+      console.log(JSON.stringify({attached:true,client:path.resolve(__filename),data:root,credential:path.resolve(file),recovered:registered.recovered===true,recoveredAttempts:registered.recoveredAttempts||[],...status,continuation,...effectiveContinuation,...(role==='brain'&&status.peerSetupManagedBy!=='web'?{
         peerSetupRequired,reviewerSpawnRequired:!status.reviewerOnline,reviewerSpawnInstruction:'若未在线，必须向用户展示 reviewerInvite.text；不要在大脑会话询问 reviewer 平台，接收邀请的 reviewer 会话负责确认自身平台，再通过宿主已授权派生能力建立独立经济模型 reviewer。宿主不支持则保留邀请供用户粘贴；小脑接入并在线后才可 start-work --confirmed。已领取的审核不会因无心跳自动改派；确定终止时显式 detach。',reviewerInvite:createInvitation('reviewer',workspace,root),
         staffingRequired:!status.staffing,staffingInstruction:'先评估本阶段独立交付边界、所需模型类型和数量、现有worker及并发条件；用 staff --file 登记评估。staff 回执中的每条 workerInvites[].text 都必须展示给对应接收端；大脑不询问 worker 平台，由邀请接收端确认自身真实平台。难任务完整交强worker，大脑不实现；当前同项目串行。',
         workerInviteStatus:!status.staffing?'pending-staffing':workerConnectRequired?'connection-required':'connected',workerInvites}:{})})); return;
@@ -252,7 +257,8 @@ const requestedProvider=option('--provider');
   if(command==='reconcile-review') {console.log(JSON.stringify(await call(root,credential,{...read(option('--file')),action:'reconcile-review',taskId:option('--task')})));return;}
   if(command==='revise-task') {console.log(JSON.stringify(await call(root,credential,{action:'revise-task',taskId:option('--task'),task:read(option('--file')),reason:option('--reason')})));return;}
   if(command==='resolve-task') {console.log(JSON.stringify(await call(root,credential,{action:'resolve-task',taskId:option('--task'),replacementTaskId:option('--replacement'),reason:option('--reason')})));return;}
-  if(command==='start-work'){console.log(JSON.stringify(await call(root,credential,{action:'start-work',confirmed:args.includes('--confirmed'),withoutReviewer:args.includes('--without-reviewer')})));return;}
+  if(command==='start-work'||command==='start-goal'){console.log(JSON.stringify(await call(root,credential,{action:'start-work',goalId:option('--goal'),confirmed:args.includes('--confirmed'),withoutReviewer:args.includes('--without-reviewer')})));return;}
+  if(command==='finish-goal'){console.log(JSON.stringify(await call(root,credential,{action:'finish-goal',goalId:option('--goal'),summary:option('--summary')})));return;}
   if (['heartbeat','wake-bind','wake-disable','park','claim','status','finish-project'].includes(command)) {
     if (['wake-bind','park'].includes(command) && fs.existsSync(path.resolve(file)+'.wait.lock')) throw Error('先停止本会话旧 wait 进程并核实等待锁，不能同时阻塞等待和自动唤醒');
     // [AI-added] 2026-09-14 09:43
@@ -312,7 +318,7 @@ const provider=option('--provider','codex');
     const result = read(option('--file'));
     const usageFile = option('--usage-file');
     console.log(JSON.stringify(await call(root, credential, { action: 'submit', taskId: result.taskId, attemptId: result.attemptId, result, usage: usageFile ? read(usageFile) : undefined })));
-    } else throw Error('Commands: resume, start-work, connect, rebind, detach, invite, handoff-invite, handover-wait, staff, assign, task-budget, retry, configure-repair, reconcile-review, revise-task, resolve-task, discover, discover-session, status, attach, wait, claim, plan, closeout, preflight, submit, progress, wake-bind, wake-disable, park, finish-project, scope-ack, attention-ack, activity-start, activity-end, stage-register, stage-submit, stage-resume');
+    } else throw Error('Commands: resume, start-work, start-goal, finish-goal, connect, rebind, detach, invite, handoff-invite, handover-wait, staff, assign, task-budget, retry, configure-repair, reconcile-review, revise-task, resolve-task, discover, discover-session, status, attach, wait, claim, plan, closeout, preflight, submit, progress, wake-bind, wake-disable, park, finish-project, scope-ack, attention-ack, activity-start, activity-end, stage-register, stage-submit, stage-resume');
 }
 if (require.main === module) main().catch(e => { console.error(e.message); process.exitCode = 1; });
 module.exports = { call };

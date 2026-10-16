@@ -17,7 +17,7 @@ function clean(value) {
 function pick(value, keys) {
   return Object.fromEntries(keys.filter(k => value?.[k] !== undefined && (value[k] === null || ['string','number','boolean'].includes(typeof value[k]))).map(k => [k, clean(value[k])]));
 }
-const eventKeys = ['projectId','binding','clientId','provider','role','workerId','taskId','replacementTaskId','attemptId','correlationId','revision','contractRevision','stageId','roundId','stageHeld','status','stage','error','summary','reason','durationMs','action','commandId','outcome','verdict','source','businessEventId','runtimeVersion','nodeVersion','pid'];
+const eventKeys = ['projectId','goalId','binding','clientId','provider','role','workerId','taskId','replacementTaskId','attemptId','correlationId','revision','contractRevision','stageId','roundId','stageHeld','status','stage','error','summary','reason','durationMs','action','commandId','outcome','verdict','source','businessEventId','runtimeVersion','nodeVersion','pid'];
 class Monitor extends EventEmitter {
   constructor(store, dispatcher, wake, { maxBytes = 4 * 1024 * 1024, maxFiles = 8 } = {}) {
     super(); this.setMaxListeners(100);
@@ -98,16 +98,16 @@ class Monitor extends EventEmitter {
         this.changed(id, 'connection_state', { status: b.wake ? b.armed ? 'armed' : 'not_parked' : b.continuation?.mode || 'unconfigured', provider: b.wake?.provider || b.provider || b.continuation?.provider || 'unknown' }, { projectId: p.id, binding: key, clientId: b.clientId }, initial);
       }
       for (const t of Object.values(p.tasks)) {
-        this.changed(`${p.id}/${t.id}`, 'task_state', { status: t.state, error: t.error || null }, { projectId: p.id, taskId: t.id }, initial);
+        this.changed(`${p.id}/${t.id}`, 'task_state', { status: t.state, error: t.error || null }, { projectId: p.id, goalId: t.goalId, taskId: t.id }, initial);
         for (const a of t.attempts || []) {
-          const context = { projectId: p.id, taskId: t.id, attemptId: a.id, role: a.role, binding: bindingKey(a), workerId: a.workerId, provider: a.provider, correlationId: a.id };
+          const context = { projectId: p.id, goalId: t.goalId, taskId: t.id, attemptId: a.id, role: a.role, binding: bindingKey(a), workerId: a.workerId, provider: a.provider, correlationId: a.id };
           this.changed(a.id, 'attempt_state', { status: a.settled ? 'settled' : a.claimedBy ? 'claimed' : 'prepared', summary: a.progress?.summary, stage: a.progress?.stage }, context, initial);
           if (a.wakeNotice) this.changed(a.id + '/wake', 'wake_state', a.wakeNotice, context, initial);
         }
         if (t.scopeAlert?.wakeNotice) this.changed(`${p.id}/${t.id}/scope`, 'scope_wake', t.scopeAlert.wakeNotice, { projectId: p.id, taskId: t.id }, initial);
       }
       for(const round of Object.values(p.reviewStages||{}))for(const a of [...(round.attemptHistory||[]),...(round.attempt?[round.attempt]:[])]) {
-        const context={projectId:p.id,stageId:round.stageId,roundId:round.id,attemptId:a.id,role:'brain',binding:'brain',provider:a.provider,correlationId:a.id};
+        const context={projectId:p.id,goalId:round.goalId,stageId:round.stageId,roundId:round.id,attemptId:a.id,role:'brain',binding:'brain',provider:a.provider,correlationId:a.id};
         this.changed(a.id,'attempt_state',{status:a.settled?'settled':a.claimedBy?'claimed':'prepared'},context,initial);
         if(round.wakeNotice)this.changed(a.id+'/wake','wake_state',round.wakeNotice,context,initial);
       }
@@ -161,7 +161,7 @@ class Monitor extends EventEmitter {
           observationStale: !observation || Date.now() - Date.parse(observation.checkedAt) > 30000,
           handoverPending: !!p.handovers?.[key], rebindInvitation:rebindInvitation?pick(rebindInvitation,['id','status','expiresAt','clientId','recover']):null, active };
       });
-      const tasks = Object.values(p.tasks).map(t => ({ ...pick(t, ['id','title','state','error','maxAttempts','workerId','requiredCapability','blockKind','contractRevision','stageId','roundId','stageHeld']), dependsOn: t.dependsOn || [],
+      const tasks = Object.values(p.tasks).map(t => ({ ...pick(t, ['id','goalId','title','state','error','maxAttempts','workerId','requiredCapability','blockKind','contractRevision','stageId','roundId','stageHeld']), dependsOn: t.dependsOn || [],
         supersedes:t.supersedes||[],resolution:t.resolution||null,
         attention: t.attention ? pick(t.attention, ['id','message','kind','createdAt','acknowledged']) : null,
         budgetExhausted: attempts.exhausted(t), waitingForWorker: t.state === 'ready' && !matches(p, t),
@@ -174,7 +174,7 @@ class Monitor extends EventEmitter {
       const dispatch=require('./maintenance.cjs').dispatchStatus(this.d);
       if(dispatch.blocked && !p.completedAt && !p.archivedAt)alerts.push({code:'dispatch_blocked',message:clean(dispatch.reason)});
       if (p.paused) alerts.push({ code: 'paused', message: '项目暂停，后续调度停止' });
-      if (p.startup?.state === 'waiting') alerts.push({ code: 'startup', message: '等待大脑完成启动门禁' });
+      if (p.startup?.state === 'waiting' && !p.goals) alerts.push({ code: 'startup', message: '等待大脑完成启动门禁' });
       if (p.planning?.state === 'pending') alerts.push({ code: 'planning', message: '阶段收尾待处理' });
       if (attempts.projectExhausted(p)) alerts.push({ code: 'project_budget', message: '项目累计额度已耗尽' });
       for (const t of tasks) {
@@ -204,6 +204,7 @@ class Monitor extends EventEmitter {
         if (c.active.length && c.wakeEnabled && !c.armed && !c.active.some(a => a.claimed)) alerts.push({ code: 'not_parked', binding: c.binding, message: '端未 park，待办尚未领取' });
       }
       return { id: p.id, workspace: p.workspace, mode: p.mode, archivedAt: p.archivedAt, paused: !!p.paused, completedAt: p.completedAt, startup: p.startup?.state,
+        ...(p.webSetup ? { title: p.title, team: require('./project-setup.cjs').team(this.wake.desktop, p), ...require('./goals.cjs').summary(p) } : {}),
         usage:require('./usage.cjs').summary(this.store.state,p.id),reviewStages:require('./stage-review.cjs').summary(p),
         planning: p.planning ? { state: p.planning.state, needsAttention: !!p.planning.needsAttention } : null, connections, tasks, alerts };
     });

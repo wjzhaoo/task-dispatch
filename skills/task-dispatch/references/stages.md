@@ -65,6 +65,6 @@ node "<客户端脚本>" stage-submit --file "<终审JSON>" --credential "<大�
 
 任务 blocked、uncertain、额度不足或 reviewer 离线会通知大脑。优先处理 task_attention / scope_attention 中的具体问题，必要时 retry、改派或补充额度，再调用 `stage-resume --round <roundId>`。不因等待时间长撤销已领取审核。准备终审中断时，只有核实验证子进程已停止后才加 `--confirmed-stopped` 恢复；已领取的终审保留所有权，不能重放。
 
-小脑按原契约返修无需改阶段计划；需要改变已执行契约时不能直接 revise-task 或 configure-repair。应向大脑报告具体阻塞，不擅自改约定。阶段不是空队列判定：只有大脑整体验收通过且项目所有已登记任务终结，才可 finish-project。
+小脑按原契约返修无需改阶段计划；需要改变已执行契约时不能直接 revise-task 或 configure-repair。应向大脑报告具体阻塞，不擅自改约定。Web 目标项目的任务和阶段均属于当前 goalId，禁止混入其他目标。阶段不是空队列判定：大脑确认当前目标的全部验收与阶段终审通过，任务结算完成后执行 `finish-goal --goal <goalId> --summary <验收摘要>`，再 resume 处理后续目标或待命。finish-project 是独立的整个项目结束操作，不能跳过未完成目标；非目标项目仍在所有任务验收后 finish-project。
 
 大脑确需修订尚未执行的阶段成员时，先暂停项目并等待空闲边界，再调用 revise-task，填写原因；服务记录旧契约并更新阶段契约摘要。小脑、执行员无此权限；已执行任务仍不可改写契约。

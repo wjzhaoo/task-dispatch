@@ -69,21 +69,36 @@ class Admin {
     }
     if (v.instanceId !== this.monitor.instanceId || v.revision !== this.monitor.store.state.revision) throw Error('状态已变化，请刷新后重试');
     // [AI-added] 2026-09-17 18:54: Include bounded task reminder recovery in guarded admin commands.
-    const allowed = ['pause','resume','retry','task-budget','finish-project','reopen-project','cleanup-preview','cleanup-apply','stop','detach','assign','wake-retry','wake-remind','rebind-invite','rebind-cancel','lifecycle-preview','archive-project','restore-project','delete-project','reset-task'];
+    const allowed = ['start-goal','cancel-goal','configure-team','start-work','pause','resume','retry','task-budget','finish-project','reopen-project','cleanup-preview','cleanup-apply','stop','detach','assign','wake-retry','wake-remind','rebind-invite','rebind-cancel','lifecycle-preview','archive-project','restore-project','delete-project','reset-task'];
     if (!allowed.includes(v.action)) throw Error('不支持的管理操作');
     const p = this.monitor.store.state.projects[v.projectId];
     if (!['cleanup-preview','cleanup-apply','stop'].includes(v.action) && !p) throw Error('项目不存在');
     if (p?.archivedAt && !['restore-project','delete-project','lifecycle-preview'].includes(v.action)) throw Error('请先恢复已归档项目');
-    if (['stop','cleanup-apply','detach','retry','finish-project','wake-retry','wake-remind','rebind-invite','rebind-cancel'].includes(v.action) && v.confirmed !== true) throw Error('必须确认此操作影响');
+    if (['start-goal','start-work','stop','cleanup-apply','detach','retry','finish-project','wake-retry','wake-remind','rebind-invite','rebind-cancel'].includes(v.action) && v.confirmed !== true) throw Error('必须确认此操作影响');
     const receipt = { fingerprint, state: 'pending', at: new Date().toISOString() };
     this.commands.set(v.commandId, receipt);
     // Keep completed receipts bounded; never evict an unresolved operation.
     if (this.commands.size > 2000) for (const [id, old] of this.commands) if (old.state === 'completed') { this.commands.delete(id); break; }
     this.persist();
-    this.monitor.record('operator_started', { action: v.action, projectId: v.projectId, taskId: v.taskId, commandId: v.commandId, summary: v.reason });
+    this.monitor.record('operator_started', { action: v.action, projectId: v.projectId, goalId: v.goalId, taskId: v.taskId, commandId: v.commandId, summary: v.reason });
     let result;
     try {
       switch (v.action) {
+        case 'start-goal': result = require('./core/goals.cjs').authorize(this.d, p.id, v.goalId, v.confirmed); break;
+        case 'cancel-goal': result = require('./core/goals.cjs').cancel(this.d, p.id, v.goalId); break;
+        case 'configure-team': result = require('./core/project-setup.cjs').configureTeam(this.desktop, p.id, v.workers); break;
+        case 'start-work': {
+          if (p.goals) {
+            const drafts = Object.values(p.goals).filter(goal => goal.state === 'draft');
+            const goalId = v.goalId || p.activeGoalId || p.goalQueue[0] || (drafts.length === 1 ? drafts[0].id : null);
+            result = require('./core/goals.cjs').authorize(this.d, p.id, goalId, v.confirmed); break;
+          }
+          const team = require('./core/project-setup.cjs').team(this.desktop, p);
+          if (!team.canStart) throw Error('暂不能开始，请核对所有成员已就绪、项目未暂停且尚未开始');
+          result = require('./core/startup.cjs').start(this.desktop, { projectId: p.id, role: 'brain', clientId: p.bindings.brain.clientId }, { confirmed: true });
+          this.monitor.wake.next = 0;
+          break;
+        }
         case 'lifecycle-preview': result = require('./core/lifecycle.cjs').preview(p, v); break;
         case 'archive-project': case 'restore-project': case 'delete-project': case 'reset-task':
           result = require('./core/lifecycle.cjs').apply(this, v); break;
@@ -133,7 +148,7 @@ class Admin {
     } catch (e) { result = { ok: false, error: clean(e.message) }; }
     this.commands.set(v.commandId, { ...receipt, state: 'completed', result });
     this.persist();
-    this.monitor.record('operator_completed', { action: v.action, projectId: v.projectId, taskId: v.taskId, commandId: v.commandId, status: result.ok ? 'completed' : 'failed', error: result.error });
+    this.monitor.record('operator_completed', { action: v.action, projectId: v.projectId, goalId: v.goalId, taskId: v.taskId, commandId: v.commandId, status: result.ok ? 'completed' : 'failed', error: result.error });
     if (v.action === 'stop' && result.ok) setImmediate(() => this.stop());
     return result;
   }
@@ -175,6 +190,10 @@ class Admin {
         if (url.pathname === '/admin/api/open-project') { const value = await body(req); json(res, 200, await this.openProject(value.projectId)); return true; }
       }
       if (req.method === 'GET') {
+        if (url.pathname === '/admin/api/join-invite') {
+          const project = this.monitor.store.state.projects[url.searchParams.get('projectId')];
+          json(res, 200, require('./core/project-setup.cjs').invitation(this.desktop, project, this.root, url.searchParams.get('binding'))); return true;
+        }
         if (url.pathname === '/admin/api/session') { json(res, 200, { csrf: session.csrf }); return true; }
         if (url.pathname === '/admin/api/overview') { json(res, 200, this.overview()); return true; }
         if (url.pathname === '/admin/api/events') { json(res, 200, await this.monitor.history(url.searchParams)); return true; }
