@@ -84,7 +84,7 @@ class QoderWake {
   }
   // Diagnose why no live descriptor was found so the reminder names the actual fix, and mark
   // the errors the wake loop may auto-repair: start Qoder when closed, restart when its plugin
-  // did not load. An inconclusive probe keeps the old generic reminder without auto-repair.
+  // did not load. An inconclusive probe reports unavailability without auto-repair.
   async bridgeDownError() {
     if (!this.directories.some(pluginInstalled)) return Error('Qoder direct wake bridge unavailable; install the task-dispatch Qoder bridge and restart Qoder');
     const state = await this.qoderState();
@@ -167,7 +167,7 @@ class QoderWake {
   async read(binding, descriptorOverride) {
     if (!isSessionId(binding?.threadId)) throw Error('Qoder session ID required');
     if (typeof binding.workspace !== 'string' || !path.isAbsolute(binding.workspace)) throw Error('Qoder binding workspace required');
-    const result = await this.request('/v1/sessions/' + encodeURIComponent(binding.threadId) + '/state', {}, descriptorOverride);
+    const result = await this.request('/v1/sessions/' + encodeURIComponent(binding.threadId) + '/state', {}, descriptorOverride || binding.descriptorPath);
     if (result.sessionId !== binding.threadId) throw Error('Qoder bridge returned a different session');
     return { thread: { id: result.sessionId, cwd: path.resolve(binding.workspace), reachable: true,
       status: { type: runtimeState(result.runtimeState) } }, turns: [] };
@@ -179,33 +179,42 @@ class QoderWake {
     if (!marker) throw Error('Qoder wake requires a task-dispatch marker');
     const result = await this.request('/v1/sessions/' + encodeURIComponent(binding.threadId) + '/messages', {
       method: 'POST', body: JSON.stringify({ prompt, requestId: marker })
-    });
+    }, binding.descriptorPath);
     if (result.sessionId !== binding.threadId || result.accepted !== true) throw Error('Qoder bridge response uncertain');
     return { delivered: true, runtimeState: result.runtimeState };
   }
   async sessions() { throw Error('Qoder direct wake requires an explicit session ID'); }
   async messages() { throw Error('Qoder direct wake does not expose conversation history'); }
-  async discoverInvitation({ invitationId, workspace, now = Date.now() }) {
+  resolveInvitation({ invitationId, workspace, now = Date.now() }) {
     if (!INVITATION_ID_RE.test(invitationId || '')) throw Error('A generated Qoder invitation ID is required');
     if (typeof workspace !== 'string' || !path.isAbsolute(workspace)) throw Error('Qoder invitation workspace required');
-    const matches = []; let firstBridgeError;
+    const matches = [];
     for (const configDir of this.directories) {
       const file = path.join(configDir, 'task-dispatch-invitations', invitationId.toLowerCase() + '.json');
       let value;
       try { value = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { continue; }
+      if (value?.ambiguous) throw Error('Qoder invitation was used by multiple sessions; generate a new invitation');
       const createdAt = Date.parse(value?.createdAt);
       if (value?.version !== 1 || value.invitationId !== invitationId.toLowerCase() ||
           !isSessionId(value.sessionId) || typeof value.workspace !== 'string' || !path.isAbsolute(value.workspace) ||
           path.relative(path.resolve(workspace), path.resolve(value.workspace)) !== '' || !Number.isFinite(createdAt) ||
           createdAt > now + 60_000 || now - createdAt > INVITATION_MAX_AGE_MS) continue;
+      matches.push({id:value.sessionId,directory:path.resolve(value.workspace),descriptorPath:descriptorFile(configDir)});
+    }
+    return matches;
+  }
+  async discoverInvitation(input) {
+    const matches = []; let firstBridgeError;
+    for (const record of this.resolveInvitation(input)) {
       try {
-        await this.read({ threadId: value.sessionId, workspace: path.resolve(value.workspace) }, descriptorFile(configDir));
-        matches.push({ id: value.sessionId, directory: path.resolve(value.workspace) });
+        await this.read({threadId:record.id,workspace:record.directory,descriptorPath:record.descriptorPath});
+        matches.push({id:record.id,directory:record.directory});
       } catch (error) { firstBridgeError ||= error; }
     }
     if (!matches.length && firstBridgeError) throw firstBridgeError;
     return matches;
   }
+
 }
 
 module.exports = { QoderWake, BRIDGE_VERSION, DESCRIPTOR_NAME, MAX_MESSAGE_CHARS,

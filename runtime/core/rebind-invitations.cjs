@@ -16,7 +16,7 @@ function create(store,root,input){
   store.event(s,'rebind_invitation_created',{projectId:p.id,binding:input.binding,clientId:old.clientId,summary:recover?'confirmed recovery':'safe handover'});});
  const capability=old.capabilities?.[0];
  // [AI-added] 2026-09-21: The console shows the variant matching the platform being replaced first.
- let preferred;try{preferred=require('./platforms.cjs').normalizeProvider(old.wake?.provider||old.continuation?.provider||old.provider)}catch{preferred=undefined}
+ const preferred=old.provider;
  return buildRebindInvitation({role,workerId,capability,workspace:p.workspace,dataRoot:root,clientPath:path.resolve(__dirname,'../desktop-client.cjs'),referencePath:path.resolve(__dirname,'../../skills/task-dispatch/references/connection.md'),invitationId:id,recover,preferredProvider:preferred});
 }
 function authorize(store,{workspace,invitationId,role,workerId,recover,clientId}){
@@ -30,8 +30,9 @@ function authorize(store,{workspace,invitationId,role,workerId,recover,clientId}
  return {project:p,invite,key};
 }
 function update(store,projectId,invitationId,status,clientId){
- if(!invitationId)return;
- store.change(s=>{const invite=s.projects[projectId]?.rebindInvitations?.[invitationId];if(!invite)return;if(['completed','cancelled','superseded','expired'].includes(invite.status))return;invite.status=status;invite.clientId=clientId||invite.clientId;if(!['pending','claimed'].includes(status))invite.finishedAt=new Date().toISOString();store.event(s,'rebind_invitation_'+status,{projectId,binding:invite.binding,clientId:invite.clientId});});
+ const current=store.state.projects[projectId]?.rebindInvitations?.[invitationId];
+ if(!current||['completed','cancelled','superseded','expired'].includes(current.status)||(current.status===status&&(!clientId||current.clientId===clientId)))return;
+ store.change(s=>{const invite=s.projects[projectId]?.rebindInvitations?.[invitationId];invite.status=status;invite.clientId=clientId||invite.clientId;if(!['pending','claimed'].includes(status))invite.finishedAt=new Date().toISOString();store.event(s,'rebind_invitation_'+status,{projectId,binding:invite.binding,clientId:invite.clientId});});
 }
 function cancel(store,projectId,invitationId){
  const invite=store.state.projects[projectId]?.rebindInvitations?.[invitationId];if(!invite||!['pending','claimed'].includes(invite.status))throw Error('邀请不存在或已结束');

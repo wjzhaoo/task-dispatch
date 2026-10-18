@@ -1,5 +1,7 @@
 # 运行服务健康排查（2026-09-15）
 
+> 历史排查记录：以下版本、目录、缺陷和命令仅反映 2026-09-15 的现场。现行接入统一使用 connect/resume，存储和审核规则以 [运行文档](runtime.md) 为准。
+
 本文记录对本地服务 `C:\Users\Administrator\.task-dispatch-service` 的一次只读排查结果，包含已确认缺陷、实测数据、运维风险和修复顺序。所有数据均由只读方式取得，排查过程未修改任何代码、配置或 `state.json`。
 
 数据目录：`C:\Users\Administrator\.task-dispatch-service`

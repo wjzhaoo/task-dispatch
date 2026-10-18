@@ -26,7 +26,6 @@ function start(desktop,identity,input){
  {const b=p.bindings?.reviewer;if(!b||p.handovers?.reviewer||(b.wake&&!b.armed)||!require('./pre-review.cjs').online(desktop.d,p))missing.push('reviewer');}
  if(missing.length)throw Error('Peers not ready: '+missing.join(', '));
  desktop.store.change(s=>{const q=s.projects[p.id];q.startup={state:'started',startedAt:new Date().toISOString(),startedBy:identity.clientId};
-  if(q.webSetup&&!q.goals&&!Object.keys(q.tasks).length&&!q.planning)q.planning={id:require('./storage.cjs').id(),kind:'initial',state:'pending',acceptedTaskIds:[],createdAt:q.startup.startedAt};
   desktop.store.event(s,'work_started',{projectId:p.id,...q.startup});});
  return {ok:true,startup:status(desktop.store.state.projects[p.id])};
 }

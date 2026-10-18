@@ -64,7 +64,7 @@ async function collect(dispatcher,{root=path.join(process.env.CODEX_HOME||path.j
  const refs=[],cache=new Map(),updates=[],ledgers=new Map();
  for(const p of Object.values(dispatcher.store.state.projects))for(const item of require('./brain-activities.cjs').records(p)){
   const r=item.record,b=r.usageBinding||(!(p.bindingHistory||[]).length?p.bindings?.[bindingKey(r)]?.wake:null);
-  if(!b||(b.provider||'codex')!=='codex')continue;
+  if(!b||b.provider!=='codex')continue;
   let end=r.settledAt?Date.parse(r.settledAt):now;
   if(r.settled&&!r.settledAt){const receipt=dispatcher.receiptPath(r.id);if(!fs.existsSync(receipt))continue;end=fs.statSync(receipt).mtimeMs;}
   const start=Date.parse(r.claimedAt||r.startedAt);if(!Number.isFinite(start)||!Number.isFinite(end)||end<start)continue;

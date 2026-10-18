@@ -46,9 +46,9 @@ test('source mutation persists complete paths while leaving original candidate i
 test('configured failed evidence stops before a reviewer can receive the attempt',async t=>{
  const x=fixture(),{Store}=require('../runtime/core/storage.cjs'),{Dispatcher}=require('../runtime/core/dispatcher.cjs');
  const store=new Store(path.join(path.dirname(x.root),'state'));t.after(()=>store.close());
- const d=new Dispatcher(store,{enableRealCalls:false},()=>assert.fail('no model'));d.addProject({id:'p',workspace:x.workspace,mode:'desktop'});
+ const d=new Dispatcher(store,{maxConcurrent:2});d.addProject({id:'p',workspace:x.workspace,mode:'desktop'});
  store.change(s=>s.projects.p.startup={state:'started'});d.addTask('p',{id:'T',title:'t',instructions:'i',acceptance:'a',allowedPaths:['check.cjs']});
- const a=snapshot(x.workspace,d.artifacts);store.change(s=>Object.assign(s.projects.p.tasks.T,{state:'review_ready',artifactId:a.id,artifactHash:a.hash,changedFiles:[],attempts:[{id:'worker',role:'worker',settled:true,baselineId:a.id}]}));
+ const a=snapshot(x.workspace,d.artifacts);store.change(s=>Object.assign(s.projects.p.tasks.T,{state:'review_ready',artifactId:a.id,artifactHash:a.hash,snapshotPolicy:a.policy,changedFiles:[],attempts:[{id:'worker',contractRevision:1,role:'worker',settled:true,baselineId:a.id}]}));
  d.configureValidation('p',{...x.config,evidenceResult:'tmp/absent.json'});
  require('./stage-fixture.cjs').peers(new (require('../runtime/core/desktop.cjs').Desktop)(d),'p');store.change(s=>{s.projects.p.tasks.T.roundId='fixture';});
  await d.execute('p','T');const task=store.state.projects.p.tasks.T;
@@ -58,9 +58,9 @@ test('configured failed evidence stops before a reviewer can receive the attempt
 test('dispatcher preserves candidate on environment block and retries review only',async t=>{
  const x=fixture();const {Store}=require('../runtime/core/storage.cjs');const {Dispatcher}=require('../runtime/core/dispatcher.cjs');
  const store=new Store(path.join(path.dirname(x.root),'state'));t.after(()=>store.close());
- const d=new Dispatcher(store,{enableRealCalls:false},()=>{});d.addProject({id:'p',workspace:x.workspace,mode:'desktop'});store.change(s=>{s.projects.p.startup={state:'started'};});d.addTask('p',{id:'T',title:'t',instructions:'i',acceptance:'a',allowedPaths:['check.cjs']});
+ const d=new Dispatcher(store,{maxConcurrent:2});d.addProject({id:'p',workspace:x.workspace,mode:'desktop'});store.change(s=>{s.projects.p.startup={state:'started'};});d.addTask('p',{id:'T',title:'t',instructions:'i',acceptance:'a',allowedPaths:['check.cjs']});
  const a=snapshot(x.workspace,d.artifacts);
- store.change(s=>{Object.assign(s.projects.p.tasks.T,{state:'review_ready',artifactId:a.id,artifactHash:a.hash,changedFiles:[],attempts:[{id:'worker',role:'worker',baselineId:a.id,settled:true}]});});
+ store.change(s=>{Object.assign(s.projects.p.tasks.T,{state:'review_ready',artifactId:a.id,artifactHash:a.hash,snapshotPolicy:a.policy,changedFiles:[],attempts:[{id:'worker',contractRevision:1,role:'worker',baselineId:a.id,settled:true}]});});
  d.configureValidation('p',x.config);fs.writeFileSync(path.join(x.workspace,'node_modules','dependency'),'installed');
  // Candidate package files must match live source for dependency reuse.
  fs.renameSync(path.join(x.workspace,'node_modules'),path.join(x.workspace,'saved-dependencies'));

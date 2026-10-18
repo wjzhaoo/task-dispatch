@@ -8,23 +8,15 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { Store, read, atomic } = require('./core/storage.cjs');
 const { Dispatcher } = require('./core/dispatcher.cjs');
-const { factory } = require('./adapters/agents.cjs');
 const { Desktop } = require('./core/desktop.cjs');
-function validateConfig(c) {
-  if (c.version !== 1 || typeof c.enableRealCalls !== 'boolean' || !Number.isInteger(c.maxConcurrent) || c.maxConcurrent < 1 || c.maxConcurrent > 16) throw Error('Invalid config/version/maxConcurrent');
-  if (!c.profiles || typeof c.profiles !== 'object' || !Object.keys(c.profiles).length) throw Error('No profiles configured');
-  for (const p of Object.values(c.profiles)) {
-    if (!['codex', 'zcode'].includes(p.adapter) || typeof p.command !== 'string' || !p.command || !Array.isArray(p.args) || p.args.some(x => typeof x !== 'string')) throw Error('Invalid adapter profile');
-    if (p.timeoutMs !== undefined && (!Number.isInteger(p.timeoutMs) || p.timeoutMs < 1000)) throw Error('Invalid timeout');
-  }
-}
-async function serve(root, { adapterFactory, wakeAdapter, port = 0, logger = () => {} } = {}) {
+const { validateConfig } = require('./core/config.cjs');
+async function serve(root, { wakeAdapter, port = 0, logger = () => {} } = {}) {
   const config = read(path.join(root, 'config.json')); validateConfig(config);
   const store = new Store(root);
   const tokenFile = path.join(root, 'admin-token');
   if (!fs.existsSync(tokenFile)) fs.writeFileSync(tokenFile, crypto.randomBytes(32).toString('hex'), { flag: 'wx', mode: 0o600 });
   const token = fs.readFileSync(tokenFile, 'utf8').trim();
-  const dispatcher = new Dispatcher(store, config, adapterFactory || factory(config));
+  const dispatcher = new Dispatcher(store, config);
   const serviceLog = value => { try { logger(value); } catch (error) { dispatcher.logError = error.message; } };
   const syncRegistry = () => {
     const registry = require('./core/service-registry.cjs');
@@ -32,11 +24,7 @@ async function serve(root, { adapterFactory, wakeAdapter, port = 0, logger = () 
     if (result.error) dispatcher.registryError = result.error;
   };
   const desktop = new Desktop(dispatcher);
-  require('./core/goals.cjs').migrate(store);
   // [AI-added] 2026-09-15 18:56
-/* Previous implementation:
-const wake = new (require('./core/wake.cjs').Wake)(desktop, wakeAdapter || new (require('./adapters/mimo-wake.cjs').WakeProviders)());
-*/
 const wake = new (require('./core/wake.cjs').Wake)(desktop, wakeAdapter || new (require('./adapters/mimo-wake.cjs').WakeProviders)({qoder:{dataRoot:root}}));
   let stopping = false, timer, usageCollection = null, nextUsageCollection = 0;
   // [AI-added] 2026-09-16: Browser monitoring shares the existing service and business guards.
@@ -48,33 +36,38 @@ const wake = new (require('./core/wake.cjs').Wake)(desktop, wakeAdapter || new (
   const server = http.createServer(async (req, res) => {
     if (await admin.handle(req, res)) return;
     let observedResult;
-    const reply = (code, data) => { observedResult = data; res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
+    const reply = (code, data) => { if(res.destroyed)return; observedResult = data; res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(data)); };
     if (req.headers.origin) return reply(403, { error: 'Browser origins are not allowed' });
     if (req.method === 'POST' && req.url === '/desktop') {
       if (stopping) return reply(503, { error: 'Service stopping' });
       let identity, observedAction, observedInput;
       const requestStarted = Date.now();
-      try { identity = desktop.authenticate((req.headers.authorization || '').replace(/^Bearer /, '')); }
+      try { identity = desktop.authenticate((req.headers.authorization || '').replace(/^Bearer /, ''), {allowPending:true}); }
       catch (e) { return reply(401, { error: e.message }); }
-      res.once('finish', () => { if (observedAction) monitor.contact(identity, observedAction, res.statusCode, Date.now() - requestStarted, { ...observedInput, ...observedResult }); });
+      res.once('finish', () => { if (observedAction && !identity.pending) monitor.contact(identity, observedAction, res.statusCode, Date.now() - requestStarted, { ...observedInput, ...observedResult }); });
       try {
         let body = '';
         for await (const chunk of req) { body += chunk; if (Buffer.byteLength(body) > 1024 * 1024) throw Error('Request too large'); }
         const v = JSON.parse(body);
         observedAction = v.action; observedInput = { taskId: v.taskId, attemptId: v.attemptId };
+        const waited = identity.pending === true;
+        if (waited) {
+          if (v.action !== 'resume') return reply(401,{error:'Invalid desktop token; pending handover can only resume'});
+          const abort = new AbortController(), cancel = () => abort.abort(); res.once('close',cancel);
+          try {identity = await require('./core/connection.cjs').waitForHandover(wake,identity,v,monitor,abort.signal);}
+          finally {res.off('close',cancel);}
+          if (!identity) {identity={pending:true};return reply(200,{attached:false,handoverPending:true,nextAction:'resume',nextInstruction:'仍在等待旧端结算，继续当前 resume 进程；不重复 connect 或执行旧任务。'});}
+        }
         desktop.assertBinding(identity);
         if (v.action === 'heartbeat') return reply(200,{ok:true});
         if (v.action === 'start-work') return reply(200,require('./core/startup.cjs').start(desktop,identity,v));
-        if (v.action === 'wake-bind') return reply(200, await wake.bind(identity, v));
-        if (v.action === 'configure-continuation') return reply(200, await require('./core/continuation.cjs').configure(wake, identity, v));
+        if (v.action === 'resume') {const result=await require('./core/connection.cjs').resume(wake,identity,v);return reply(200,{attached:true,...(waited?desktop.status(identity):{}),...result});}
         if (v.action === 'park') return reply(200, wake.park(identity));
         if (v.action === 'detach') return reply(200,desktop.detach(identity,v.workerId,v.targetRole));
         if (v.action === 'assign') return reply(200,desktop.assign(identity,v));
         if (v.action === 'task-budget') return reply(200,desktop.taskBudget(identity,v));
         // [AI-added] 2026-09-21 09:38: Brain-authenticated recovery actions avoid administrator-token workarounds.
         if (v.action === 'retry') return reply(200,desktop.retry(identity,v));
-        if (v.action === 'configure-repair') return reply(200,desktop.configureRepair(identity,v));
-        if (v.action === 'reconcile-review') return reply(200,desktop.reconcileReview(identity,v));
         if (v.action === 'revise-task') return reply(200,desktop.reviseTask(identity,v));
         if (v.action === 'resolve-task') return reply(200,desktop.resolveTask(identity,v));
         if (v.action === 'staff') return reply(200,desktop.staff(identity,v));
@@ -98,8 +91,7 @@ const wake = new (require('./core/wake.cjs').Wake)(desktop, wakeAdapter || new (
         if (v.action !== 'wait') throw Error('Unknown desktop action');
         const completedReply = () => {
           const completed=desktop.completion(identity);if(!completed)return false;
-          // Old clients only recognize job; 410 makes their retry loop terminate.
-          reply(v.acceptCompleted===true?200:410,v.acceptCompleted===true?completed:{...completed,error:completed.message});return true;
+          reply(200,completed);return true;
         };
         if(completedReply())return;
         if (store.state.projects[identity.projectId].bindings[bindingKey(identity)].wake) throw Error('Wake enabled: use claim/park instead of wait');
@@ -112,19 +104,22 @@ const wake = new (require('./core/wake.cjs').Wake)(desktop, wakeAdapter || new (
         waiters.add(cancel); res.once('close', cleanup);
         poll = setInterval(() => { try {
           const completed=desktop.completion(identity);
-          if(completed){finish(v.acceptCompleted===true?200:410,v.acceptCompleted===true?completed:{...completed,error:completed.message});return;}
+          if(completed){finish(200,completed);return;}
           const job = desktop.claim(identity); if (job) finish(200, { job });
         } catch (e) { finish(400, { error: e.message }); } }, 250);
-        timeout = setTimeout(() => finish(200, { job: null }), 20000);
+        timeout = setTimeout(() => finish(200, require('./core/wait-policy.cjs').idle()), 20000);
         return;
       } catch (e) { return reply(400, { error: e.message }); }
     }
     const supplied = Buffer.from(req.headers.authorization || ''), expected = Buffer.from('Bearer ' + token);
     if (supplied.length !== expected.length || !crypto.timingSafeEqual(supplied, expected)) return reply(401, { error: 'Unauthorized' });
     if (req.headers.origin) return reply(403, { error: 'Browser origins are not allowed' });
-    /* Previous implementation:
-    if (req.method === 'GET' && req.url === '/status') return reply(200, { ...store.state, runtimeVersion: '0.3.0', usage: require('./core/usage.cjs').summary(store.state), usageError:dispatcher.usageError, storage: dispatcher.storageStatus, active: [...dispatcher.active.keys()], stopping: dispatcher.stopping, fatal: dispatcher.fatal?.message });
-    */
+    if (req.method === 'GET' && req.url.startsWith('/ready')) {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (url.pathname !== '/ready') return reply(404, {error:'Not found'});
+      try { return reply(200, {ready:!stopping, connectionProtocol:require('./core/connection.cjs').PROTOCOL, ...require('./core/connection.cjs').ready(desktop, Object.fromEntries(url.searchParams))}); }
+      catch (error) { return reply(400,{error:error.message}); }
+    }
     // [AI-added] 2026-09-14 19:48
     if (req.method === 'GET' && req.url === '/status') return reply(200, { ...store.state, runtimeVersion: require('../package.json').version, usage: require('./core/usage.cjs').summary(store.state), usageError:dispatcher.usageError, storage: dispatcher.storageStatus, active: [...dispatcher.active.keys()], stopping: dispatcher.stopping, fatal: dispatcher.fatal?.message });
     if (req.method !== 'POST' || req.url !== '/command') return reply(404, { error: 'Not found' });
@@ -136,21 +131,17 @@ const wake = new (require('./core/wake.cjs').Wake)(desktop, wakeAdapter || new (
       switch (v.action) {
         case 'create-web-project': { const result = require('./core/project-setup.cjs').create(dispatcher, v.setup); syncRegistry(); return reply(200, result); }
         case 'add-project': dispatcher.addProject(v.project); syncRegistry(); break;
-        case 'attach-desktop': { const result = desktop.attach(v); syncRegistry(); return reply(200, result); }
+        case 'connect': { const began=Date.now(), before=Object.keys(store.state.projects).length; const result=await require('./core/connection.cjs').connect(wake,v); if(Object.keys(store.state.projects).length!==before)syncRegistry(); reply(200,result); if(result.attached)monitor.contact(result.registration,'connect',200,Date.now()-began); return; }
         case 'add-task': dispatcher.addTask(v.projectId, v.task); break;
         case 'pause': dispatcher.pause(v.projectId, true); break;
         case 'resume': dispatcher.pause(v.projectId, false); break;
         case 'finish-project': dispatcher.finishProject(v.projectId); break;
         case 'reopen-project': dispatcher.finishProject(v.projectId,true); break;
         case 'retry': dispatcher.retry(v.projectId, v.taskId, v.confirmedStopped, v.restartWorker === true); break;
-        case 'return-scope': require('./core/scope-recovery.cjs').request(dispatcher,v.projectId,v.taskId); break;
-        case 'reconcile-review': dispatcher.reconcileReview(v.projectId,v.taskId,v.config); break;
         case 'budget': dispatcher.budget(v.projectId, v.maxTurns); break;
         case 'task-budget': dispatcher.taskBudget(v.projectId,v.taskId,v.additionalAttempts,v.reason); break;
         case 'configure-validation': dispatcher.configureValidation(v.projectId,v.config,v.profileName); break;
         case 'configure-snapshot': dispatcher.configureSnapshot(v.projectId, v.config); break;
-        case 'prepare-review': dispatcher.prepareReview(v.projectId, v.taskId, v.evidence); break;
-        case 'configure-repair': dispatcher.configureRepair(v.projectId, v.taskId, v.config); break;
         case 'usage': return reply(200, require('./core/usage.cjs').summary(store.state, v.projectId));
         case 'collect-usage': return reply(200, await require('./core/codex-usage.cjs').collect(dispatcher));
         case 'record-usage': return reply(200, require('./core/usage.cjs').record(store, v.projectId, v.taskId, v.attemptId, v.usage));

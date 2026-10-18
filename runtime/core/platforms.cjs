@@ -1,20 +1,15 @@
 'use strict';
 
 // [AI-added] 2026-09-15 20:30
-// Desktop host providers are distinct from headless execution profiles. Keep
-// aliases, role eligibility and continuation capability in one place.
+// Keep host aliases, role eligibility and continuation capability in one place.
 const ALIASES = Object.freeze({
+  codeartsdoer: 'codearts',
   qodercn: 'qoder',
   'qoder-cn': 'qoder',
-  codeartsdoer: 'codearts',
   'open-code': 'opencode'
 });
-const ROLE_PROVIDERS = Object.freeze({
-  brain: Object.freeze(['codex', 'mimo', 'qoder', 'opencode']),
-  reviewer: Object.freeze(['codex', 'mimo', 'qoder', 'opencode'])
-});
-const WAKE_PROVIDERS = Object.freeze(['codex', 'mimo', 'qoder', 'codearts', 'opencode']);
-const DISCOVERY_PROVIDERS = Object.freeze(['mimo', 'codearts']);
+const WAKE_PROVIDERS = Object.freeze(['codex', 'mimo', 'qoder', 'codearts', 'opencode', 'dsh']);
+const ROLE_PROVIDERS = Object.freeze({ brain: WAKE_PROVIDERS, reviewer: WAKE_PROVIDERS });
 const PROVIDER_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 
 function normalizeProvider(value) {
@@ -34,9 +29,4 @@ function assertRoleProvider(role, provider) {
   }
   return normalized;
 }
-function discoveryProviders(provider) {
-  const normalized = normalizeProvider(provider);
-  return normalized ? [normalized] : [...DISCOVERY_PROVIDERS];
-}
-
-module.exports = {ALIASES,ROLE_PROVIDERS,WAKE_PROVIDERS,DISCOVERY_PROVIDERS,normalizeProvider,continuationMode,assertRoleProvider,discoveryProviders};
+module.exports = {ALIASES,ROLE_PROVIDERS,WAKE_PROVIDERS,normalizeProvider,continuationMode,assertRoleProvider};

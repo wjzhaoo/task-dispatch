@@ -2,7 +2,7 @@
 const fs=require('node:fs'),path=require('node:path');
 const {spawn}=require('node:child_process');
 const {sha,atomic}=require('./storage.cjs');
-const {manifest,difference,allowed,validatePaths,loadSnapshot}=require('./snapshot.cjs');
+const {manifest,difference,allowed,validatePaths,loadSnapshot,assertNoReservedNames}=require('./snapshot.cjs');
 function policy(v){
  if(!v||v.dependencies!=='copy-node-modules')throw Error('reviewValidation.dependencies must be copy-node-modules');
  if(!Array.isArray(v.checks)||!v.checks.length||v.checks.length>10)throw Error('Provide 1..10 npm checks');
@@ -63,6 +63,7 @@ async function prepare({workspace,artifacts,artifactId,artifactHash,root,config,
  const cfg=policy(config),cwd=path.join(root,'tree');
  const original=loadSnapshot(artifacts,artifactId);
  if(original.hash!==artifactHash||sha(JSON.stringify(original.files))!==artifactHash)throw Error('Validation candidate integrity mismatch');
+ assertNoReservedNames(original.files);
  const omitted=f=>allowed(f,cfg.outputs)||f.startsWith('.keys/')||f==='.env'||f.startsWith('.env.');
  // [AI-added] 2026-09-22 09:20: Declared outputs cannot hide changed deliverables.
  if(changedFiles.some(f=>allowed(f,cfg.outputs)))throw Error('Validation outputs overlap changed files');

@@ -74,8 +74,8 @@ blocked 的处理入口为菜单 5 查看错误、菜单 7 → 3 配置环境、
 
 领取者可执行 `node runtime/desktop-client.cjs preflight --task TASK_ID --attempt ATTEMPT_ID --credential CREDENTIAL_FILE --data SERVICE_DIR`。仅允许当前绑定、已领取且未结算的 attempt；不领取任务、不生成候选、不写回执或修改任务状态。接口访问日志仍按现有监控记录。
 
-worker 预检报告范围外路径、受保护计划/其他任务证据及未完成的恢复目标、Windows 保留文件名；审核角色报告输入的新增、修改、删除路径。返回列表各限 100 项，counts 给出总数。旧 attempt 使用兼容范围提示，最终仍以提交校验为准。预检通过不冻结文件，submit 必须重新验证当前候选，不能凭旧预检结果放行。
+worker 预检报告范围外路径、受保护计划/其他任务证据及未完成的恢复目标、Windows 保留文件名；审核角色报告输入的新增、修改、删除路径。返回列表各限 100 项，counts 给出总数。所有尝试使用当前的计划文档保护及任务证据目录规则。预检通过不冻结文件，submit 必须重新验证当前候选，不能凭旧预检结果放行。
 
-审核提交的完整差异保存在原回执的 reviewChanges，旧 reviewChanged 布尔字段继续兼容。展示错误最多列出前 20 项及 2000 字符；不要用展示截断推断其他路径没变化。验证树的源文件变更完整列表保存于 validation report 的 changedPaths。
+审核提交的完整差异保存在原回执的 reviewChanges；缺少该列表的旧回执会被拒绝。展示错误最多列出前 20 项及 2000 字符；不要用展示截断推断其他路径没变化。验证树的源文件变更完整列表保存于 validation report 的 changedPaths。
 
 审核员应读取 `.dispatch-evidence/validation.json`，不要在审核输入树运行会写缓存或数据的检查。配置的测试在独立 validations 树运行，临时目录在启动前创建；真实数据路径与缓存目录需由项目测试主动隔离。outputs 不得覆盖本次修改交付物。此机制不是操作系统沙箱，不能拦截测试脚本主动访问绝对路径；不能通过忽略整个数据或证据目录掩盖污染。

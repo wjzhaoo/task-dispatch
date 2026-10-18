@@ -70,7 +70,7 @@ function wakeLoopFixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wake-repair-test-')), workspace = path.join(root, 'work');
   fs.mkdirSync(workspace);
   const store = new Store(path.join(root, 'data')); t.after(() => store.close());
-  const d = new Dispatcher(store, { enableRealCalls: false }, () => { throw Error('no model'); });
+  const d = new Dispatcher(store,{maxConcurrent:2});
   const desktop = new Desktop(d);
   desktop.attach({ workspace, role: 'worker', clientId: 'worker123', token: 'a'.repeat(64) });
   store.change(s => { for (const p of Object.values(s.projects)) p.startup = { state: 'started' }; });
@@ -87,7 +87,7 @@ function wakeLoopFixture(t) {
 
 test('wake loop repairs a restartable host failure, records the event and the operator note', async t => {
   const x = wakeLoopFixture(t);
-  await x.wake.bind(x.identity, { provider: 'codex', threadId: 'test-thread', turnId: 'old-turn', experimentalAcknowledged: true });
+  await x.wake.bind(x.identity, { provider: 'codex', threadId: 'test-thread', turnId: 'old-turn' });
   x.wake.park(x.identity);
   x.d.addTask(x.identity.projectId, { id: 'T', title: 't', instructions: 'i', acceptance: 'a', allowedPaths: ['README.md'] });
   require('./stage-fixture.cjs').begin(x.d);
@@ -105,9 +105,32 @@ test('wake loop repairs a restartable host failure, records the event and the op
   assert.equal(x.repairs.length, 2);
 });
 
+test('wake diagnostics survive subsequent uncertain ticks without replaying the notification', async t => {
+  const x = wakeLoopFixture(t);
+  await x.wake.bind(x.identity, {provider: 'codex', threadId: 'test-thread', turnId: 'old-turn'});
+  x.wake.park(x.identity);
+  x.d.addTask(x.identity.projectId, {id: 'T', title: 't', instructions: 'i', acceptance: 'a', allowedPaths: ['README.md']});
+  require('./stage-fixture.cjs').begin(x.d); x.d.tick();
+  let sends = 0;
+  x.adapter.send = async () => {
+    sends++;
+    const error = Error('OpenCode delivery uncertain');
+    error.wakeHint = 'OpenCode CLI 返回错误：Session environment rejected';
+    throw error;
+  };
+  const notice = () => x.store.state.projects[x.identity.projectId].tasks.T.attempts.at(-1).wakeNotice;
+  await x.wake.run();
+  assert.equal(notice().status, 'uncertain');
+  assert.match(notice().error, /Session environment rejected/);
+  const firstError = notice().error;
+  await x.wake.run();
+  assert.equal(notice().status, 'uncertain'); assert.equal(notice().error, firstError);
+  assert.equal(sends, 1);
+});
+
 test('wake loop ignores non-restartable failures and adapters without repair', async t => {
   const x = wakeLoopFixture(t);
-  await x.wake.bind(x.identity, { provider: 'codex', threadId: 'test-thread', turnId: 'old-turn', experimentalAcknowledged: true });
+  await x.wake.bind(x.identity, { provider: 'codex', threadId: 'test-thread', turnId: 'old-turn' });
   x.wake.park(x.identity);
   x.d.addTask(x.identity.projectId, { id: 'T', title: 't', instructions: 'i', acceptance: 'a', allowedPaths: ['README.md'] });
   require('./stage-fixture.cjs').begin(x.d);
@@ -124,7 +147,7 @@ test('wake loop ignores non-restartable failures and adapters without repair', a
 // [AI-added] 2026-09-21 23:41: A successful repair must reopen the marker-safe retry path.
 test('wake send retries on the next tick after a completed host repair', async t => {
   const x = wakeLoopFixture(t);
-  await x.wake.bind(x.identity, { provider: 'codex', threadId: 'test-thread', turnId: 'old-turn', experimentalAcknowledged: true });
+  await x.wake.bind(x.identity, { provider: 'codex', threadId: 'test-thread', turnId: 'old-turn' });
   x.wake.park(x.identity);
   x.d.addTask(x.identity.projectId, { id: 'T', title: 't', instructions: 'i', acceptance: 'a', allowedPaths: ['README.md'] });
   require('./stage-fixture.cjs').begin(x.d);
@@ -151,7 +174,7 @@ test('wake send retries on the next tick after a completed host repair', async t
 // and reconcile an already-present marker before attempting the repaired send again.
 test('wake send keeps unperformed repair uncertain and deduplicates a repaired retry by marker', async t => {
   const uncertain = wakeLoopFixture(t);
-  await uncertain.wake.bind(uncertain.identity, { provider: 'codex', threadId: 'test-thread', turnId: 'old-turn', experimentalAcknowledged: true });
+  await uncertain.wake.bind(uncertain.identity, { provider: 'codex', threadId: 'test-thread', turnId: 'old-turn' });
   uncertain.wake.park(uncertain.identity);
   uncertain.d.addTask(uncertain.identity.projectId, { id: 'T', title: 't', instructions: 'i', acceptance: 'a', allowedPaths: ['README.md'] });
   require('./stage-fixture.cjs').begin(uncertain.d);
@@ -162,7 +185,7 @@ test('wake send keeps unperformed repair uncertain and deduplicates a repaired r
   assert.equal(uncertain.store.state.projects[uncertain.identity.projectId].tasks.T.attempts.at(-1).wakeNotice.status, 'uncertain');
 
   const dedupe = wakeLoopFixture(t);
-  await dedupe.wake.bind(dedupe.identity, { provider: 'codex', threadId: 'test-thread', turnId: 'old-turn', experimentalAcknowledged: true });
+  await dedupe.wake.bind(dedupe.identity, { provider: 'codex', threadId: 'test-thread', turnId: 'old-turn' });
   dedupe.wake.park(dedupe.identity);
   dedupe.d.addTask(dedupe.identity.projectId, { id: 'T', title: 't', instructions: 'i', acceptance: 'a', allowedPaths: ['README.md'] });
   require('./stage-fixture.cjs').begin(dedupe.d);

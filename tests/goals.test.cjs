@@ -10,20 +10,27 @@ const goals = require('../runtime/core/goals.cjs'), setup = require('../runtime/
 function fixture(t) {
   fs.mkdirSync(path.resolve('tmp'), { recursive: true });
   const dir = fs.mkdtempSync(path.resolve('tmp/goals-')), workspace = path.join(dir, 'work'); fs.mkdirSync(workspace);
-  const store = new Store(path.join(dir, 'service')), d = new Dispatcher(store, { enableRealCalls: false }, () => assert.fail('No model calls'));
+  const store = new Store(path.join(dir, 'service')), d = new Dispatcher(store,{maxConcurrent:2});
   const desktop = new Desktop(d), adapter = { read: async b => ({ thread: { id: b.threadId, cwd: workspace, status: { type: 'idle' } }, turns: [] }), send: async () => ({}) };
   const wake = new Wake(desktop, adapter);
   t.after(async () => { await wake.close(); await d.stop(); store.close(); fs.rmSync(dir, { recursive: true, force: true }); });
-  const create = (extra = {}) => setup.create(d, { commandId: crypto.randomUUID(), workspace, title: '新增目标', objective: '实现并通过阶段验收', ...extra });
+  const create = (extra = {}) => {
+    const result = setup.create(d, { commandId: crypto.randomUUID(), workspace, title: '新增目标', objective: '实现并通过阶段验收', ...extra });
+    if (extra.startMode !== 'manual' && setup.team(desktop, store.state.projects[result.projectId]).ready === 3) goals.authorize(d, result.projectId, result.goalId, true);
+    return result;
+  };
   const first = create(), projectId = first.projectId, p = () => store.state.projects[projectId], identities = {};
   async function connect() {
     for (const role of ['brain', 'reviewer', 'worker']) {
       identities[role] = desktop.attach({ workspace, role, clientId: crypto.randomUUID(), token: crypto.randomBytes(32).toString('hex'), sessionId: role,
         ...(role === 'worker' ? { workerId: 'default', capabilities: ['general'] } : {}), joinInvitationId: setup.joinId(p(), role) });
-      await wake.bind(identities[role], { provider: 'codex', threadId: role, turnId: 'test-turn', experimentalAcknowledged: true });
+      await wake.bind(identities[role], { provider: 'codex', threadId: role, turnId: 'test-turn' });
     }
     for (const role of ['brain', 'reviewer', 'worker']) wake.park(identities[role]);
     d.tick();
+    assert.equal(p().activeGoalId, null);
+    assert.equal(p().planning, undefined);
+    goals.authorize(d, projectId, first.goalId, true); d.tick();
   }
   async function drain() { for (let i = 0; i < 15; i++) { await Promise.all([...d.active.values()].map(value => value.promise)); d.tick(); if (!d.active.size) return; } assert.fail('Dispatcher did not drain'); }
   async function passGoal(taskId) {
@@ -124,24 +131,24 @@ test('idle team edits keep existing sessions; a generic default worker does not 
   x.d.finishProject(x.p().id); assert.ok(x.p().completedAt);
 });
 
-test('legacy single-target migration preserves waiting authorization, invitations and durable request identity', t => {
-  const x = fixture(t), old = { commandId: crypto.randomUUID(), workspace: x.workspace, title: '旧目标', objective: '旧验收', workers: setup.defaultWorkers() };
-  const invitation = crypto.randomUUID();
-  x.store.change(s => { const p = s.projects[x.p().id]; delete p.goals; delete p.goalQueue; delete p.activeGoalId;
-    p.title = old.title; p.objective = old.objective; p.startup = { state: 'waiting' };
-    p.webSetup = { commandId: old.commandId, fingerprint: sha(JSON.stringify(old)), createdAt: '2026-10-01T00:00:00.000Z', invitations: { brain: invitation } }; });
-  goals.migrate(x.store); const p = x.p(), goal = Object.values(p.goals)[0], revision = x.store.state.revision;
-  assert.equal(goal.state, 'draft'); assert.equal(goal.startAuthorizedAt, null); assert.equal(p.startup.state, 'waiting');
-  assert.equal(setup.joinId(p, 'brain'), invitation); assert.equal(setup.create(x.d, old).goalId, goal.id);
-  assert.equal(x.store.state.revision, revision); goals.migrate(x.store); assert.equal(x.store.state.revision, revision);
+test('incomplete managed projects are rejected without rewriting state',t=>{
+ const x=fixture(t),before=fs.readFileSync(x.store.file);
+ assert.throws(()=>x.store.change(state=>delete state.projects[x.p().id].goals),/Unsupported managed project/);
+ assert.deepEqual(fs.readFileSync(x.store.file),before);
+ assert.throws(()=>x.store.change(state=>state.projects[x.p().id].goals[x.first.goalId].legacy=true),/Unsupported goal/);
+ assert.deepEqual(fs.readFileSync(x.store.file),before);
 });
 
-test('adopting an executing legacy project only adds goal ownership, preserving the frozen stage contract', async t => {
-  const x = await require('./stage-fixture.cjs').setup(t); x.task('A'); x.register(x.definition(['A']));
-  const before = structuredClone(x.p().reviewStages.R1), clients = structuredClone(x.p().bindings);
-  const added = setup.create(x.d, { commandId: crypto.randomUUID(), workspace: x.workspace, title: '后续目标', objective: '旧工作完成后执行' });
-  assert.ok(x.p().activeGoalId); assert.notEqual(x.p().activeGoalId, added.goalId);
-  assert.equal(x.p().tasks.A.goalId, x.p().activeGoalId); assert.equal(x.p().reviewStages.R1.goalId, x.p().activeGoalId);
-  const { goalId, ...after } = x.p().reviewStages.R1; assert.deepEqual(after, before); assert.deepEqual(x.p().bindings, clients);
-  assert.equal(x.p().goals[added.goalId].state, 'queued');
+test('adding a web goal never adopts an unmanaged executing project',async t=>{
+ const x=await require('./stage-fixture.cjs').setup(t);x.task('A');x.register(x.definition(['A']));
+ const before=structuredClone(x.p()),revision=x.store.state.revision;
+ assert.throws(()=>setup.create(x.d,{commandId:crypto.randomUUID(),workspace:x.workspace,title:'目标',objective:'完成并验收'}),/Unsupported managed project/);
+ assert.deepEqual(x.p(),before);assert.equal(x.store.state.revision,revision);
+});
+
+test('accepted tasks without a passed stage cannot finish a goal',async t=>{
+ const x=fixture(t);await x.connect();
+ x.desktop.plan(x.identities.brain,{id:'A',title:'A',instructions:'实现',acceptance:'正确',allowedPaths:['A.txt'],workerId:'default',requiredCapability:'general'});
+ x.store.change(state=>state.projects[x.p().id].tasks.A.state='accepted');
+ assert.throws(()=>x.desktop.finishGoal(x.identities.brain,{summary:'已完成'}),/必须通过完整阶段终审/);
 });

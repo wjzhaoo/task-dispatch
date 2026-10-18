@@ -13,7 +13,7 @@ function fixture(t) {
   const root=fs.mkdtempSync(path.join(temp,'features-')),workspace=path.join(root,'workspace');fs.mkdirSync(workspace);
   fs.writeFileSync(path.join(workspace,'README.md'),'before');
   const store=new Store(path.join(root,'service'));t.after(()=>store.close());
-  const d=new Dispatcher(store,{enableRealCalls:false},()=>{throw Error('No real models');});
+  const d=new Dispatcher(store,{maxConcurrent:2});
   const desktop=new Desktop(d);desktop.attach({workspace,role:'worker',clientId:'worker123',token:'a'.repeat(64)});desktop.attach({workspace,role:'brain',clientId:'brain1234',token:'b'.repeat(64)});
   const worker=desktop.authenticate('a'.repeat(64)),brain=desktop.authenticate('b'.repeat(64)),projectId=worker.projectId;
   const reviewer=require('./stage-fixture.cjs').peers(desktop,projectId).reviewer;
@@ -37,34 +37,33 @@ test('snapshot limits diagnose path; project exclusions and raised limits preser
   assert.throws(()=>snapshots.policy({exclude:['../outside/']}));assert.throws(()=>snapshots.policy({exclude:['.dispatch-evidence/']}));
 });
 // [AI-added] 2026-09-14 19:48
-test('snapshot ignores CodeArts project metadata while retaining task-dispatch authority files',t=>{
-  const x=fixture(t);fs.mkdirSync(path.join(x.workspace,'.codeartsdoer','.codebase'),{recursive:true});
+test('snapshot ignores IDE project metadata while retaining task-dispatch authority files',t=>{
+  const x=fixture(t);fs.mkdirSync(path.join(x.workspace,'.ide-cache','.codebase'),{recursive:true});
   fs.mkdirSync(path.join(x.workspace,'.task-dispatch'),{recursive:true});
-  fs.writeFileSync(path.join(x.workspace,'.codeartsdoer','.codebase','file-index.db'),'volatile');
+  fs.writeFileSync(path.join(x.workspace,'.ide-cache','.codebase','file-index.db'),'volatile');
   fs.writeFileSync(path.join(x.workspace,'.task-dispatch','plan.md'),'authority');
   const files=require('../runtime/core/snapshot.cjs').manifest(x.workspace,{});
-  assert.equal(files['.codeartsdoer/.codebase/file-index.db'],undefined);
+  assert.equal(files['.ide-cache/.codebase/file-index.db'],undefined);
   assert.ok(files['.task-dispatch/plan.md']);
   // [AI-added] 2026-09-14 20:03
   const snapshot=require('../runtime/core/snapshot.cjs');
-  assert.equal(snapshot.ignored('.codeartsdoer/.codebase/file-index.db',{exclude:[]}),true);
+  assert.equal(snapshot.ignored('.ide-cache/.codebase/file-index.db',{exclude:[]}),true);
   assert.equal(snapshot.ignored('.task-dispatch/plan.md',{exclude:[]}),false);
 });
-test('new snapshot policy excludes root tmp while legacy policy remains reproducible',t=>{
+test('snapshot policy excludes root tmp and rejects version one',t=>{
   const x=fixture(t);fs.mkdirSync(path.join(x.workspace,'tmp'),{recursive:true});
   fs.writeFileSync(path.join(x.workspace,'tmp','volatile.json'),'changes constantly');
   fs.mkdirSync(path.join(x.workspace,'.task-dispatch'),{recursive:true});
   fs.writeFileSync(path.join(x.workspace,'.task-dispatch','plan.md'),'authority');
-  const current=snapshots.manifest(x.workspace,{}),legacy=snapshots.manifest(x.workspace,{version:1,exclude:[]});
+  const current=snapshots.manifest(x.workspace,{});assert.throws(()=>snapshots.manifest(x.workspace,{version:1,exclude:[]}),/Unsupported snapshot policy/);
   assert.equal(current['tmp/volatile.json'],undefined);assert.ok(current['.task-dispatch/plan.md']);
-  assert.ok(legacy['tmp/volatile.json']);assert.equal(snapshots.policy({}).version,2);
+  assert.equal(snapshots.policy({}).version,2);
   assert.deepEqual(snapshots.excludedTaskPaths(['tmp/result.json','src/'],{}),['tmp/result.json']);
   assert.throws(()=>x.add('TMP',{allowedPaths:['tmp/result.json']}),/snapshot-excluded temporary paths/);
 });
-test('snapshot policy migration refuses to hide an unfinished tmp deliverable',t=>{
-  const x=fixture(t);x.d.configureSnapshot(x.projectId,{version:1,exclude:[]});
-  x.add('LEGACY-TMP',{allowedPaths:['tmp/result.json']});
-  assert.throws(()=>x.d.configureSnapshot(x.projectId,{}),/LEGACY-TMP:tmp\/result.json/);
+test('snapshot configuration refuses to hide unfinished deliverables',t=>{
+ const x=fixture(t);x.add('ACTIVE',{allowedPaths:['build/result.json']});
+ assert.throws(()=>x.d.configureSnapshot(x.projectId,{exclude:['build/']}),/ACTIVE:build\/result.json/);
 });
 test('pinned policy handles cache writes but still detects stale source and review edits',async t=>{
   const x=fixture(t);x.d.configureSnapshot(x.projectId,{exclude:['tmp/']});x.add();await x.step();
@@ -75,14 +74,14 @@ test('pinned policy handles cache writes but still detects stale source and revi
   assert.equal(x.task().state,'blocked');assert.match(x.task().error,/Reviewer changed/);
 });
 test('unregistered imported candidates cannot bypass stage acceptance',async t=>{
- const x=fixture(t);x.add();x.d.prepareReview(x.projectId,'T','Inspect existing changes');await x.step();assert.equal(x.task().attempts.length,0);assert.equal(x.desktop.claim(x.brain),null);assert.notEqual(x.task().state,'accepted');
+ const x=fixture(t);x.add();assert.equal(x.d.prepareReview,undefined);assert.equal(x.d.configureRepair,undefined);assert.equal(x.d.reconcileReview,undefined);assert.equal(x.task().attempts.length,0);assert.equal(x.desktop.claim(x.brain),null);assert.notEqual(x.task().state,'accepted');
 });
 
 test('cleanup preview protects unfinished/shared refs, retains reports and rejects stale preview',t=>{
   const x=fixture(t);x.add('old');x.add('new');x.add('blocked');
   x.store.change(s=>{
     s.storagePolicy={automatic:true,retainDays:0,keepLatestAccepted:1,maxBytes:100000};
-    for(const [id,when] of [['old','2020-01-01'],['new','2021-01-01']]) {const task=s.projects[x.projectId].tasks[id];task.state='accepted';task.completedAt=when;task.artifactId=id;task.attempts=[{id,role:'brain',settled:true,artifactId:id}];}
+    for(const [id,when] of [['old','2020-01-01'],['new','2021-01-01']]) {const task=s.projects[x.projectId].tasks[id];task.state='accepted';task.completedAt=when;task.artifactId=id;task.attempts=[{id,contractRevision:1,role:'brain',settled:true,artifactId:id}];}
     const b=s.projects[x.projectId].tasks.blocked;b.state='blocked';b.artifactId='old';
   });
   for(const rel of ['artifacts/old','artifacts/new','reviews/old','reviews/new','validations/old/tree','validations/new/tree']) {const dir=path.join(x.store.root,rel);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'file'),'x');}
@@ -107,10 +106,10 @@ test('automatic cleanup reclaims settled caches beside running work while preser
     for(const [id,state] of Object.entries(states)) {
       const task=s.projects[x.projectId].tasks[id];task.state=state;task.artifactId=id;
       task.completedAt=id==='boundary'?'2026-09-08T00:00:00Z':id==='recent'?'2026-09-14T00:00:00Z':id==='latest'?'2026-09-15T00:00:00Z':'2020-01-01T00:00:00Z';
-      task.attempts=[{id,role:'brain',settled:state==='accepted',artifactId:id,...(id==='validating'?{validationPid:process.pid}:{})}];
+      task.attempts=[{id,contractRevision:1,role:'brain',settled:state==='accepted',artifactId:id,...(id==='validating'?{validationPid:process.pid}:{})}];
     }
     s.projects[x.projectId].tasks.running.scopeRecovery={originalBaselineId:'recovery',rejectedArtifactId:'rejected'};
-    s.projects.other={id:'other',tasks:{shared:{id:'shared',state:'uncertain',artifactId:'old',attempts:[]}}};
+    s.projects.other={id:'other',mode:'desktop',maxTurns:null,projectBudgetEnabled:false,turns:0,tasks:{shared:{id:'shared',state:'uncertain',...require('../runtime/core/attempts.cjs').taskFields(),artifactId:'old',attempts:[]}}};
   });
   for(const id of Object.keys(states))for(const rel of [`artifacts/${id}`,`reviews/${id}`,`validations/${id}/tree`]) {
     fs.mkdirSync(path.join(x.store.root,rel),{recursive:true});fs.writeFileSync(path.join(x.store.root,rel,'file'),'cache');
@@ -138,9 +137,9 @@ test('rolling cleanup reclaims previous settled attempts without breaking the cu
     const task=s.projects[x.projectId].tasks.T;
     task.state='review_ready';task.artifactId='candidate-new';
     task.attempts=[
-      {id:'worker-old',role:'worker',settled:true,baselineId:'before-old',artifactId:'candidate-old'},
-      {id:'review-old',role:'brain',settled:true,artifactId:'candidate-old',delivery:{cwd:'old-review'}},
-      {id:'worker-new',role:'worker',settled:true,baselineId:'before-new',artifactId:'candidate-new'}
+      {id:'worker-old',contractRevision:1,role:'worker',settled:true,baselineId:'before-old',artifactId:'candidate-old'},
+      {id:'review-old',contractRevision:1,role:'brain',settled:true,artifactId:'candidate-old',delivery:{cwd:'old-review'}},
+      {id:'worker-new',contractRevision:1,role:'worker',settled:true,baselineId:'before-new',artifactId:'candidate-new'}
     ];
   });
   for(const rel of ['artifacts/before-old','artifacts/candidate-old','artifacts/before-new','artifacts/candidate-new','reviews/review-old','validations/worker-old/tree']){
@@ -169,7 +168,7 @@ test('rolling cleanup reclaims previous settled attempts without breaking the cu
 // the batch ends; completed batch validation trees use the same guarded cleanup path.
 test('rolling cleanup protects active batch snapshots and releases ended batch copies',t=>{
   const x=fixture(t);x.add('A');x.add('B');
-  x.store.change(s=>{s.projects[x.projectId].reviewStages={batch:{id:'batch',state:'ready',members:[{taskId:'A'},{taskId:'B'}],baselineId:'batch-before',compositeArtifactId:'batch-after',attempt:{id:'batch-review',settled:false}}};});
+  x.store.change(s=>{s.projects[x.projectId].reviewStages={batch:{id:'batch',state:'ready',reviewTaskIds:['A','B'],members:[{taskId:'A'},{taskId:'B'}],baselineId:'batch-before',compositeArtifactId:'batch-after',attempt:{id:'batch-review',settled:false}}};});
   for(const rel of ['artifacts/batch-before','artifacts/batch-after','reviews/batch-review','validations/batch-review/A/tree']){
     const dir=path.join(x.store.root,rel);fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(path.join(dir,'file'),'batch');
   }
@@ -187,7 +186,7 @@ test('cleanup refuses nested junctions instead of following them',t=>{
   assert.throws(()=>maintenance.size(dir),/symlink\/junction/);assert.equal(fs.readFileSync(path.join(x.workspace,'README.md'),'utf8'),'before');
 });
 test('usage separates measured, partial and unknown; cached tokens are subsets; duplicates are idempotent',t=>{
-  const x=fixture(t);x.add();x.store.change(s=>{s.projects[x.projectId].tasks.T.attempts=[{id:'a',role:'brain'},{id:'b',role:'worker'}];});
+  const x=fixture(t);x.add();x.store.change(s=>{s.projects[x.projectId].tasks.T.attempts=[{id:'a',contractRevision:1,role:'brain'},{id:'b',contractRevision:1,role:'worker'}];});
   const value={provider:'codex',model:'strong',source:'actual-platform-meter',scope:'attempt',inputTokens:100,cachedInputTokens:80,outputTokens:10,reasoningOutputTokens:3};
   usage.record(x.store,x.projectId,'T','a',value);usage.record(x.store,x.projectId,'T','a',value);
   assert.throws(()=>usage.record(x.store,x.projectId,'T','a',{...value,inputTokens:200}),/Conflicting/);
@@ -201,7 +200,7 @@ test('Codex collector uses deduplicated deltas in attempt windows, preserving mi
   const event=(at,i,o)=>({timestamp:at,type:'event_msg',payload:{type:'token_count',info:{total_token_usage:{input_tokens:i,cached_input_tokens:i-10,output_tokens:o,reasoning_output_tokens:0}}}});
   const rows=[{type:'turn_context',payload:{model:'actual-model'}},event('2026-01-01T00:00:00Z',100,10),event('2026-01-01T00:00:01Z',200,20),event('2026-01-01T00:00:02Z',200,20),event('2026-01-01T00:00:04Z',300,30)];
   fs.writeFileSync(path.join(logs,'rollout-'+id+'.jsonl'),rows.map(JSON.stringify).join('\n'));
-  x.store.change(s=>{s.projects[x.projectId].tasks.T.attempts=[{id:'a',role:'brain',usageBinding:{provider:'codex',threadId:id},startedAt:'2026-01-01T00:00:01Z',settledAt:'2026-01-01T00:00:03Z',settled:true}];});
+  x.store.change(s=>{s.projects[x.projectId].tasks.T.attempts=[{id:'a',contractRevision:1,role:'brain',usageBinding:{provider:'codex',threadId:id},startedAt:'2026-01-01T00:00:01Z',settledAt:'2026-01-01T00:00:03Z',settled:true}];});
   const {collect}=require('../runtime/core/codex-usage.cjs');await collect(x.d,{root:logs});await collect(x.d,{root:logs});
   const run=x.task().attempts[0],u=run.observedUsage;assert.equal(u.inputTokens,100);assert.equal(u.outputTokens,10);assert.equal(u.model,'actual-model');assert.equal(run.usageObservation.reason,'collected');assert.equal(usage.summary(x.store.state).groups[0].partialAttempts,1);
 });
@@ -213,7 +212,7 @@ test('Codex usage diagnostics distinguish missing, ambiguous and unusable logs',
   for(const dir of ['a','b']){fs.mkdirSync(path.join(logs,dir));fs.writeFileSync(path.join(logs,dir,'rollout-'+id+'.jsonl'),'{}\n');}
   assert.equal(mod.locate(logs,id).reason,'log_ambiguous');
   fs.rmSync(path.join(logs,'b'),{recursive:true});
-  x.store.change(s=>{s.projects[x.projectId].tasks.T.attempts=[{id:'a',role:'brain',provider:'codex',usageBinding:{provider:'codex',threadId:id},startedAt:'2026-01-01T00:00:01Z',settledAt:'2026-01-01T00:00:03Z',settled:true}];});
+  x.store.change(s=>{s.projects[x.projectId].tasks.T.attempts=[{id:'a',contractRevision:1,role:'brain',provider:'codex',usageBinding:{provider:'codex',threadId:id},startedAt:'2026-01-01T00:00:01Z',settledAt:'2026-01-01T00:00:03Z',settled:true}];});
   await mod.collect(x.d,{root:logs});const run=x.task().attempts[0];assert.equal(run.observedUsage,undefined);assert.equal(run.usageObservation.reason,'no_usable_token_deltas');
   assert.deepEqual(usage.summary(x.store.state).groups[0].unknownReasons,{no_usable_token_deltas:1});
 });
@@ -265,8 +264,8 @@ test('MiMo wake routes without Codex turnId, retries definitive busy, reconciles
   const x=fixture(t),{Wake}=require('../runtime/core/wake.cjs');let sent=0,found=false,busy=true;
   const adapter={read:async()=>({thread:{id:'ses_test',cwd:x.workspace,status:{type:'unknown'}},turns:found?[{items:[{type:'userMessage',content:[{text:'TASK-DISPATCH-WAKE:'+x.task().attempts.at(-1).id}]}]}]:[]}),send:async b=>{assert.equal(b.model,'xiaomi/mimo-x-pro-preview');sent++;const e=Error('test');if(busy)e.safeToRetry=true;throw e;}};
   const wake=new Wake(x.desktop,{forProvider:p=>{assert.equal(p,'mimo');return adapter;}});
-  await assert.rejects(wake.bind(x.worker,{provider:'mimo',threadId:'ses_test',experimentalAcknowledged:true}),/model/);
-  await wake.bind(x.worker,{provider:'mimo',threadId:'ses_test',model:'xiaomi/mimo-x-pro-preview',experimentalAcknowledged:true});
+  await assert.rejects(wake.bind(x.worker,{provider:'mimo',threadId:'ses_test'}),/model/);
+  await wake.bind(x.worker,{provider:'mimo',threadId:'ses_test',model:'xiaomi/mimo-x-pro-preview'});
   wake.park(x.worker);x.add();await x.step();await wake.run();assert.equal(x.task().attempts.at(-1).wakeNotice.status,'pending');
   busy=false;await wake.run();assert.equal(sent,2);assert.equal(x.task().attempts.at(-1).wakeNotice.status,'uncertain');
   await wake.run();assert.equal(sent,2);found=true;await wake.run();assert.equal(x.task().attempts.at(-1).wakeNotice.status,'sent');assert.equal(sent,2);

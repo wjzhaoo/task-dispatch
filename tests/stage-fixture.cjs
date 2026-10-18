@@ -1,5 +1,6 @@
 // [AI-added] 2026-09-26 16:00: Explicit stage setup shared by infrastructure regression tests.
 'use strict';
+const {registerDesktop}=require('./service-fixture.cjs');
 const {Desktop}=require('../runtime/core/desktop.cjs');
 const stage=require('../runtime/core/stage-review.cjs');
 function peers(desktop,projectId){
@@ -21,7 +22,7 @@ function begin(d,projectId){
 async function startHttp(root,brain,reviewer){
  const {request}=require('../runtime/wizard.cjs'),{call}=require('../runtime/desktop-client.cjs');
  const status=await call(root,brain,{action:'status'});
- if(!status.boundRoles.includes('reviewer'))reviewer=await request(root,{action:'attach-desktop',workspace:status.workspace,role:'reviewer',clientId:'fixture-reviewer',token:'e'.repeat(64)});
+ if(!status.boundRoles.includes('reviewer'))reviewer=await registerDesktop(root,{workspace:status.workspace,role:'reviewer',clientId:'fixture-reviewer',token:'e'.repeat(64)});
  reviewer ||= {projectId:brain.projectId,role:'reviewer',clientId:'fixture-reviewer',token:'e'.repeat(64)};await call(root,reviewer,{action:'heartbeat'});
  return call(root,brain,{action:'start-work',confirmed:true});
 }
@@ -34,7 +35,7 @@ const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypt
 const {Store}=require('../runtime/core/storage.cjs'),{Dispatcher}=require('../runtime/core/dispatcher.cjs');
 async function setup(t){
  const parent=path.resolve('tmp/stage-v1-20260926');fs.mkdirSync(parent,{recursive:true});const dir=fs.mkdtempSync(path.join(parent,'case-')),workspace=path.join(dir,'work');fs.mkdirSync(workspace);
- const store=new Store(path.join(dir,'service')),d=new Dispatcher(store,{enableRealCalls:false},()=>assert.fail('No model calls')),desktop=new Desktop(d);
+ const store=new Store(path.join(dir,'service')),d=new Dispatcher(store,{maxConcurrent:2}),desktop=new Desktop(d);
  d.addProject({id:'p',workspace,mode:'desktop'});const identities={};for(const role of ['brain','worker','reviewer'])identities[role]=desktop.attach({workspace,role,clientId:role+'-client',token:crypto.randomBytes(32).toString('hex')});
  require('../runtime/core/pre-review.cjs').touch(d,identities.reviewer);require('../runtime/core/startup.cjs').start(desktop,identities.brain,{confirmed:true});
  t.after(async()=>{await d.stop();store.close();fs.rmSync(dir,{recursive:true,force:true});});

@@ -1,8 +1,9 @@
+const {registerDesktop,bindWake}=require('./service-fixture.cjs');
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os'),crypto=require('node:crypto');
 const {initialize,request}=require('../runtime/wizard.cjs');
-const {serve}=require('../runtime/server.cjs');
+const {serve}=require('./service-fixture.cjs');
 const {call}=require('../runtime/desktop-client.cjs');
 const {spawn}=require('node:child_process');
 const {promisify}=require('node:util');
@@ -12,7 +13,7 @@ test('preflight is read only, enforces ownership and reports protected paths; su
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'preflight-http-')),workspace=path.join(root,'work'),data=path.join(root,'service');
  fs.mkdirSync(workspace);fs.writeFileSync(path.join(workspace,'README.md'),'before');initialize(data);const s=await serve(data);
  try{
-  const attach=role=>request(data,{action:'attach-desktop',workspace,role,clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
+  const attach=role=>registerDesktop(data,{workspace,role,clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
   const brain=await attach('brain'),worker=await attach('worker');
   await require('./stage-fixture.cjs').startHttp(data,brain);
   await call(data,brain,{action:'plan',task:{id:'T',title:'edit',instructions:'edit',acceptance:'correct',allowedPaths:['README.md','docs/plans/']}});
@@ -36,7 +37,7 @@ test('review preflight and durable receipt retain added modified and deleted fil
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'preflight-review-')),workspace=path.join(root,'work'),data=path.join(root,'service');
  fs.mkdirSync(workspace);fs.writeFileSync(path.join(workspace,'README.md'),'before');fs.writeFileSync(path.join(workspace,'keep.txt'),'keep');initialize(data);const s=await serve(data);
  try{
-  const attach=role=>request(data,{action:'attach-desktop',workspace,role,clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
+  const attach=role=>registerDesktop(data,{workspace,role,clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
   const brain=await attach('brain'),worker=await attach('worker');await require('./stage-fixture.cjs').startHttp(data,brain);
   await call(data,brain,{action:'plan',task:{id:'T',title:'edit',instructions:'edit',acceptance:'correct',allowedPaths:['README.md']}});
   await require('./stage-fixture.cjs').beginHttp(data,brain,['T']);
@@ -48,7 +49,7 @@ test('review preflight and durable receipt retain added modified and deleted fil
   const before=JSON.stringify(s.store.state),check=await call(data,reviewer,{action:'preflight',taskId:'T',attemptId:review.attemptId});assert.equal(check.ok,false);assert.deepEqual(check.changes.map(c=>c.kind).sort(),['added','deleted','modified']);assert.equal(JSON.stringify(s.store.state),before);
   await call(data,reviewer,{action:'submit',taskId:'T',attemptId:review.attemptId,result:{projectId:review.projectId,taskId:'T',attemptId:review.attemptId,role:'reviewer',artifactId:review.artifactId,verdict:'pass',summary:'pass',findings:[]}});
   assert.match(s.store.state.projects[brain.projectId].tasks.T.error,/Reviewer changed.*README\.md/);
-  const receipt=JSON.parse(fs.readFileSync(s.dispatcher.receiptPath(review.attemptId)));assert.equal(receipt.reviewChanged,true);assert.equal(receipt.reviewChanges.length,3);
+  const receipt=JSON.parse(fs.readFileSync(s.dispatcher.receiptPath(review.attemptId)));assert.equal(Object.hasOwn(receipt,'reviewChanged'),false);assert.equal(receipt.reviewChanges.length,3);
   assert.equal(fs.readFileSync(path.join(workspace,'README.md'),'utf8'),'after');
  }finally{await s.close();fs.rmSync(root,{recursive:true,force:true});}
 });
@@ -61,19 +62,19 @@ test('explicit project finish drains old waiters, new clients exit successfully,
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'desktop-completion-')),workspace=fs.mkdtempSync(path.join(os.tmpdir(),'desktop-completion-work-'));initialize(root);
  const s=await serve(root);
  try {
-  const credential=await request(root,{action:'attach-desktop',workspace,role:'worker',clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
+  const credential=await registerDesktop(root,{workspace,role:'worker',clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
   await assert.rejects(request(root,{action:'finish-project',projectId:credential.projectId}),/nonempty/);
-  const brain=await request(root,{action:'attach-desktop',workspace,role:'brain',clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
+  const brain=await registerDesktop(root,{workspace,role:'brain',clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
   await require('./stage-fixture.cjs').startHttp(root,brain);
   s.dispatcher.addTask(credential.projectId,{id:'T',title:'t',instructions:'i',acceptance:'a',allowedPaths:['README.md']});
   await assert.rejects(request(root,{action:'finish-project',projectId:credential.projectId}),/accepted/);
   s.store.change(state=>{state.projects[credential.projectId].tasks.T.state='accepted';});
   const file=path.join(root,'worker.json');fs.writeFileSync(file,JSON.stringify({...credential,data:root}));
-  const legacy=assert.rejects(call(root,credential,{action:'wait'}),e=>e.status===410&&/项目已结束/.test(e.message));
+  const completed=call(root,credential,{action:'wait'});
   const running=execFile(process.execPath,[path.resolve('runtime/desktop-client.cjs'),'wait','--credential',file,'--data',root,'--seconds','20']);
   await new Promise(r=>setTimeout(r,150));
   assert.equal((await call(root,brain,{action:'finish-project'})).completed,true);
-  await legacy;const output=JSON.parse((await running).stdout);assert.equal(output.completed,true);assert.ok(!fs.existsSync(file+'.wait.lock'));
+  assert.equal((await completed).completed,true);const output=JSON.parse((await running).stdout);assert.equal(output.completed,true);assert.ok(!fs.existsSync(file+'.wait.lock'));
   assert.equal((await call(root,credential,{action:'park'})).completed,true);
   assert.equal((await call(root,credential,{action:'claim'})).completed,true);
   assert.throws(()=>s.dispatcher.addTask(credential.projectId,{id:'T2',title:'t',instructions:'i',acceptance:'a',allowedPaths:['README.md']}),/reopen/);
@@ -85,18 +86,18 @@ test('HTTP wake binding, park and wait exclusion use the authenticated role',asy
  initialize(root);
  const s=await serve(root,{wakeAdapter:{read:async()=>({thread:{id:'thread',cwd:workspace,status:{type:'active'}}}),send:async()=>{throw Error('must not send');}}});
  try {
-  const c=await request(root,{action:'attach-desktop',workspace,role:'brain',clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
+  const c=await registerDesktop(root,{workspace,role:'brain',clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
   const file=path.join(root,'brain-wake.json');fs.writeFileSync(file,JSON.stringify({...c,data:root,workspace}));
   const cli=path.resolve('runtime/desktop-client.cjs');
-  await assert.rejects(execFile(process.execPath,[cli,'wake-bind','--credential',file,'--data',root,'--thread-id','thread','--turn-id','turn']),/explicit --provider/);
-  await assert.rejects(execFile(process.execPath,[cli,'wake-bind','--provider','auto','--credential',file,'--data',root,'--thread-id','thread','--turn-id','turn']),/Provider auto is not allowed/);
+  await assert.rejects(execFile(process.execPath,[cli,'wake-bind','--credential',file,'--data',root,'--thread-id','thread','--turn-id','turn']),/is removed/);
+  await assert.rejects(execFile(process.execPath,[cli,'wake-bind','--provider','auto','--credential',file,'--data',root,'--thread-id','thread','--turn-id','turn']),/is removed/);
   assert.equal((await call(root,c,{action:'status'})).wakeEnabled,false);
-  await call(root,c,{action:'wake-bind',provider:'codex',threadId:'thread',turnId:'turn',experimentalAcknowledged:true});
+  await bindWake(root,c,{provider:'codex',threadId:'thread',turnId:'turn'});
   assert.equal((await call(root,c,{action:'park'})).parked,true);
   await assert.rejects(call(root,c,{action:'wait'}),/claim\/park/);
   assert.equal((await call(root,c,{action:'claim'})).job,null);
-  await call(root,c,{action:'wake-bind',enabled:false});
-  await assert.rejects(call(root,c,{action:'park'}),/not configured/);
+  await assert.rejects(bindWake(root,c,{enabled:false}),/explicit provider/);
+  assert.equal((await call(root,c,{action:'status'})).wakeEnabled,true);
  }finally{await s.close();}
 });
 test('desktop peers wait, hand off, survive restart and reject role spoofing',async()=>{
@@ -107,11 +108,11 @@ test('desktop peers wait, hand off, survive restart and reject role spoofing',as
  const credential=role=>({role,workspace,clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
   const brain=credential('brain'),worker=credential('worker');
  try {
-  Object.assign(brain,await request(root,{action:'attach-desktop',...brain}));
-  Object.assign(worker,await request(root,{action:'attach-desktop',...worker}));
+  Object.assign(brain,await registerDesktop(root,{...brain}));
+  Object.assign(worker,await registerDesktop(root,{...worker}));
   assert.equal(brain.projectId,worker.projectId);
   assert.match(brain.projectId,/^desktop-desktop-project-[a-z0-9-]*-[a-f0-9]{8}$/);
-  await assert.rejects(request(root,{action:'attach-desktop',...credential('worker')}),/already bound/);
+  await assert.rejects(registerDesktop(root,{...credential('worker')}),/already bound/);
   const task={id:'T',title:'edit',instructions:'edit readme',acceptance:'correct',allowedPaths:['README.md']};
   await assert.rejects(call(root,worker,{action:'plan',task}),/Only brain/);
   const waiting=call(root,worker,{action:'wait'});
@@ -145,7 +146,7 @@ test('real waiting client stays alive across service restart and returns a job',
  const cli=path.resolve(__dirname,'../runtime/desktop-client.cjs');
  const file=path.join(root,'worker.json');
  try {
-  const attached=await execFile(process.execPath,[cli,'attach','--role','worker','--workspace',workspace,'--credential',file,'--data',root],{windowsHide:true});
+  const attached=await execFile(process.execPath,[cli,'connect','--provider','zcode','--role','worker','--workspace',workspace,'--credential',file,'--data',root],{windowsHide:true});
   assert.equal(JSON.parse(attached.stdout).attached,true);
   child=spawn(process.execPath,[cli,'wait','--credential',file,'--data',root,'--seconds','60'],{windowsHide:true,stdio:['ignore','pipe','pipe']});
   let output='',error='';child.stdout.on('data',c=>output+=c);child.stderr.on('data',c=>error+=c);
@@ -153,7 +154,7 @@ test('real waiting client stays alive across service restart and returns a job',
   for(let i=0;i<50&&!fs.existsSync(file+'.wait.lock');i++)await new Promise(r=>setTimeout(r,20));
   assert.ok(fs.existsSync(file+'.wait.lock'));
   await s.close();s=await serve(root);
-  const brain=await request(root,{action:'attach-desktop',workspace,role:'brain',clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
+  const brain=await registerDesktop(root,{workspace,role:'brain',clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
   await require('./stage-fixture.cjs').startHttp(root,brain);
   await call(root,brain,{action:'plan',task:{id:'T',title:'t',instructions:'i',acceptance:'a',allowedPaths:['README.md']}});
   await require('./stage-fixture.cjs').beginHttp(root,brain,['T']);

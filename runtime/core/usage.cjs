@@ -60,7 +60,7 @@ function summary(state, projectId) {
     }
   }
   const projects=Object.values(state.projects).filter(p=>!projectId||p.id===projectId).map(p=>({projectId:p.id,projectAttempts:p.turns,projectBudgetEnabled:p.projectBudgetEnabled,maxTurns:p.maxTurns,tasks:Object.values(p.tasks).map(t=>({taskId:t.id,...require('./attempts.cjs').counts(t),maxAttempts:t.maxAttempts}))}));
-  // [AI-added] 2026-09-22 09:55: Separate trustworthy event totals from legacy per-window sums.
+  // [AI-added] 2026-09-22 09:55: Separate trustworthy event totals from overlapping per-window sums.
   const activityGroups=[],totals=[];
   for(const p of Object.values(state.projects).filter(p=>!projectId||p.id===projectId)){
     const records=require('./brain-activities.cjs').records(p);

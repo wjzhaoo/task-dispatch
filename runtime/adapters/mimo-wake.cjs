@@ -116,7 +116,6 @@ class MimoWake {
     // activity, not offline; do not infer idle from this reachability evidence.
     const latest = [...messages].reverse().find(m=>m.info?.role==='assistant' && !m.info.error && m.info.providerID && m.info.modelID);
     const model = latest ? latest.info.providerID+'/'+latest.info.modelID : undefined;
-    // Previous implementation: every read waited for this.status, including initial connection verification.
     // [AI-added] 2026-09-24 13:26: Monitor and wake reads still include live activity status.
     return { thread: { id: session.id, cwd: session.directory, reachable:true, status: { type: includeStatus ? await this.status(session.id,session.directory) : 'unknown' } }, turns, model };
   }
@@ -199,13 +198,7 @@ class MimoWake {
 class WakeProviders {
   // [AI-added] 2026-09-15 18:56
   // [AI-added] 2026-09-14 09:43
-/* Previous implementation:
-constructor(options = {}) { this.adapters = { codex: new (require('./codex-wake.cjs').CodexWake)(), mimo: new MimoWake(options.mimo) }; }
-*/
-/* Previous implementation:
-constructor(options = {}) { const codearts = new (require('./codearts-wake.cjs').CodeArtsWake)(options.codearts); this.adapters = { codex: new (require('./codex-wake.cjs').CodexWake)(), mimo: new MimoWake(options.mimo), codearts, codeartsdoer: codearts }; }
-*/
-constructor(options = {}) { const codearts = new (require('./codearts-wake.cjs').CodeArtsWake)(options.codearts); const qoder = new (require('./qoder-wake.cjs').QoderWake)(options.qoder); const opencode = new (require('./opencode-wake.cjs').OpenCodeWake)(options.opencode); this.adapters = { codex: new (require('./codex-wake.cjs').CodexWake)(), mimo: new MimoWake(options.mimo), codearts, qoder, opencode }; }
-  forProvider(provider) { provider=require('../core/platforms.cjs').normalizeProvider(provider)||'codex';if (!Object.hasOwn(this.adapters, provider)) throw Error('Wake provider not connected: ' + provider); return this.adapters[provider]; }
+constructor(options = {}) { const qoder = new (require('./qoder-wake.cjs').QoderWake)(options.qoder); const opencode = new (require('./opencode-wake.cjs').OpenCodeWake)(options.opencode); this.adapters = { dsh: new (require('./dsh-wake.cjs').DshWake)(options.dsh), codearts: new (require('./codearts-wake.cjs').CodeArtsWake)(options.codearts), codex: new (require('./codex-wake.cjs').CodexWake)(), mimo: new MimoWake(options.mimo), qoder, opencode }; }
+  forProvider(provider) { provider=require('../core/platforms.cjs').normalizeProvider(provider);if (!Object.hasOwn(this.adapters, provider)) throw Error('Wake provider not connected: ' + provider); return this.adapters[provider]; }
 }
 module.exports = { MimoWake, WakeProviders, effectivePermission };

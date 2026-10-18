@@ -32,22 +32,6 @@ class Admin {
     }, 2000); this.heartbeat.unref();
   }
   overview() { return require('./core/dashboard.cjs').aggregateSnapshot(this.monitor.snapshot(), this.root, { file: this.registryFile }); }
-  // [AI-added] 2026-09-17 13:54
-  async openProject(projectId) {
-    const project = this.overview().projects.find(item => item.id === projectId);
-    if (!project?.service?.dataRoot) throw Error('项目不在系统目录清单中');
-    const root = path.resolve(project.service.dataRoot);
-    if (root === path.resolve(this.root)) return { url: '/admin/', current: true };
-    if (!fs.existsSync(path.join(root, 'config.json'))) throw Error('项目服务目录已失效，请核对工作目录');
-    const wizard = require('./wizard.cjs');
-    if (!await wizard.online(root)) await wizard.start(root);
-    const endpoint = JSON.parse(fs.readFileSync(path.join(root, 'endpoint.json'), 'utf8'));
-    const target = `http://127.0.0.1:${endpoint.port}`;
-    const response = await fetch(target + '/admin/ticket', { method: 'POST', headers: { Authorization: 'Bearer ' + fs.readFileSync(path.join(root, 'admin-token'), 'utf8').trim() }, signal: AbortSignal.timeout(5000) });
-    const result = await response.json();
-    if (!response.ok || typeof result.url !== 'string') throw Error(result.error || '目标项目管理台不可用');
-    return { url: result.url, current: false };
-  }
   bearer(req) {
     const a = Buffer.from(req.headers.authorization || ''), b = Buffer.from('Bearer ' + this.token);
     return a.length === b.length && crypto.timingSafeEqual(a, b);
@@ -74,7 +58,7 @@ class Admin {
     const p = this.monitor.store.state.projects[v.projectId];
     if (!['cleanup-preview','cleanup-apply','stop'].includes(v.action) && !p) throw Error('项目不存在');
     if (p?.archivedAt && !['restore-project','delete-project','lifecycle-preview'].includes(v.action)) throw Error('请先恢复已归档项目');
-    if (['start-goal','start-work','stop','cleanup-apply','detach','retry','finish-project','wake-retry','wake-remind','rebind-invite','rebind-cancel'].includes(v.action) && v.confirmed !== true) throw Error('必须确认此操作影响');
+    if (['start-goal','cancel-goal','configure-team','start-work','pause','resume','task-budget','assign','reopen-project','stop','cleanup-apply','detach','retry','finish-project','wake-retry','wake-remind','rebind-invite','rebind-cancel'].includes(v.action) && v.confirmed !== true) throw Error('必须确认此操作影响');
     const receipt = { fingerprint, state: 'pending', at: new Date().toISOString() };
     this.commands.set(v.commandId, receipt);
     // Keep completed receipts bounded; never evict an unresolved operation.
@@ -165,7 +149,7 @@ class Admin {
         if (req.headers.origin || !this.bearer(req)) { json(res, 401, { error: '需要本地启动器' }); return true; }
         if (this.tickets.size >= 100) this.tickets.clear();
         const ticket = crypto.randomBytes(32).toString('hex'); this.tickets.set(ticket, Date.now() + 60000);
-        json(res, 200, { url: origin + '/admin/#ticket=' + ticket }); return true;
+        json(res, 200, { ticket }); return true;
       }
       if (url.pathname === '/admin/login' && req.method === 'POST') {
         if (req.headers.origin !== origin) throw Error('需要同源登录');
@@ -176,18 +160,12 @@ class Admin {
         this.sessions.set(id, { csrf, expires: Date.now() + 8 * 3600000 });
         json(res, 200, { csrf }, { 'Set-Cookie': `td_admin=${id}; HttpOnly; SameSite=Strict; Path=/admin; Max-Age=28800` }); return true;
       }
-      const assets = { '/admin': 'index.html', '/admin/': 'index.html', '/admin/app.js': 'app.js', '/admin/style.css': 'style.css' };
-      if (req.method === 'GET' && assets[url.pathname]) {
-        const file = assets[url.pathname]; res.writeHead(200, { 'Content-Type': file.endsWith('.js') ? 'text/javascript; charset=utf-8' : file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end(fs.readFileSync(path.join(__dirname, 'web', file))); return true;
-      }
+      if (!url.pathname.startsWith('/admin/api/') || url.pathname === '/admin/api/open-project') { json(res, 404, { error: 'Not found' }); return true; }
       const session = this.session(req);
       if (!session) { json(res, 401, { error: '请运行 web-console.bat 登录管理台' }); return true; }
       if (req.method === 'POST') {
         if (req.headers.origin !== origin || req.headers['x-csrf-token'] !== session.csrf) { json(res, 403, { error: '同源控制校验失败' }); return true; }
         if (url.pathname === '/admin/api/commands') { json(res, 200, await this.command(await body(req))); return true; }
-        // [AI-added] 2026-09-17 13:54
-        if (url.pathname === '/admin/api/open-project') { const value = await body(req); json(res, 200, await this.openProject(value.projectId)); return true; }
       }
       if (req.method === 'GET') {
         if (url.pathname === '/admin/api/join-invite') {

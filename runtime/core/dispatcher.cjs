@@ -7,8 +7,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { atomic, StorageWriteError, read, id, sha, overlaps, plainDirectory } = require('./storage.cjs');
 const { snapshot, manifest, difference, allowed, validatePaths, loadSnapshot, reviewCopy } = require('./snapshot.cjs');
-// [AI-added] 2026-09-20: Monitored-scope hashing keeps candidates recorded before the IDE-cache
-// rule comparable with fresh manifests.
 const snapshotApi = require('./snapshot.cjs');
 const { name, nonempty, parseResult, prompt } = require('./contracts.cjs');
 // [AI-added] 2026-09-21 09:38: Resolved replacement tasks are terminal without pretending the original task passed review.
@@ -28,8 +26,8 @@ function replacementInput(input) {
   return supersedes;
 }
 class Dispatcher {
-  constructor(store, config, factory) {
-    this.store = store; this.config = config; this.factory = factory;
+  constructor(store, config) {
+    this.store = store; this.config = config;
     this.active = new Map(); this.stopping = false;
     this.storageReservations = new Map();
     // [AI-added] 2026-09-22 09:20: This gate works even when state.json cannot be written.
@@ -53,8 +51,8 @@ class Dispatcher {
         delete s.deletedProjects[deletedId];
       }
       for (const p of Object.values(s.projects)) if (overlaps(p.workspace, workspace)) throw Error('Overlapping project workspaces');
-      s.projects[projectId] = { id: projectId, workspace, mode: 'desktop', brain: input.brain, worker: input.worker, maxTurns, projectBudgetEnabled:maxTurns!==null, attemptPolicyVersion:1, turns: 0, paused: false, tasks: {}, ...(input.webSetup ? require('./project-setup.cjs').fields(input.webSetup) : {}) };
-      if(input.mode==='desktop')s.projects[projectId].startup={state:'waiting'};
+      s.projects[projectId] = { id: projectId, workspace, mode: 'desktop', maxTurns, projectBudgetEnabled:maxTurns!==null, turns: 0, paused: false, tasks: {}, ...(input.webSetup ? require('./project-setup.cjs').fields(input.webSetup) : {}) };
+      s.projects[projectId].startup={state:'waiting'};
       this.store.event(s, 'project_registered', { projectId });
     });
   }
@@ -90,11 +88,9 @@ class Dispatcher {
       }
       p.tasks[input.id] = { id: input.id, title: input.title, instructions: input.instructions, acceptance: input.acceptance, allowedPaths: input.allowedPaths, dependsOn: deps,
         ...(goalId ? { goalId } : {}),
-        ...(supersedes.length ? { supersedes, supersedeReason: input.supersedeReason.trim() } : {}), contractRevision: 1,
+        ...(supersedes.length ? { supersedes, supersedeReason: input.supersedeReason.trim() } : {}),
         state: 'ready', repairs: 0, sessions: {}, attempts: [], findings: [] };
-      p.tasks[input.id].maxAttempts=maxAttempts;
-      if(input.workerId!==undefined)p.tasks[input.id].workerId=input.workerId;
-      if(input.requiredCapability!==undefined)p.tasks[input.id].requiredCapability=input.requiredCapability;
+      Object.assign(p.tasks[input.id], attempts.taskFields({ ...input, maxAttempts }));
       if (input.validationProfile) p.tasks[input.id].validationProfile = input.validationProfile;
       this.store.event(s, 'task_created', { projectId, goalId, taskId: input.id });
     });
@@ -107,7 +103,7 @@ class Dispatcher {
     if (this.active.has(projectId)) throw Error('Project still running');
     this.store.change(s => {
       const p = s.projects[projectId]; if (!p) throw Error('Unknown project');
-      if (reopen) { if(p.completedAt&&p.mode==='desktop')p.startup={state:'waiting'};delete p.completedAt; }
+      if (reopen) { if(p.completedAt)p.startup={state:'waiting'};delete p.completedAt; }
       else {
         if (p.goals && Object.values(p.goals).some(goal => !require('./goals.cjs').ended(goal))) throw Error('还有未完成目标；请使用 finish-goal 完成活动目标，或取消尚未开始的目标');
         const tasks=Object.values(p.tasks);
@@ -163,27 +159,6 @@ class Dispatcher {
     if (extraBytes + reserved > disk.bavail * disk.bsize) throw Error('Insufficient free disk space for service copy');
   }
   createSnapshot(workspace, config) { return snapshot(workspace, this.artifacts, config, bytes => this.checkStorage(bytes)); }
-  prepareReview(projectId, taskId, evidence) {
-    if(this.store.state.projects[projectId]?.tasks[taskId]?.roundId)throw Error('Stage member candidates must come from worker submissions');
-    nonempty(evidence, 'Review evidence description');
-    const p = this.store.state.projects[projectId], t = p?.tasks[taskId];
-    if (!t || t.attempts.length || !['ready','blocked'].includes(t.state) || this.active.has(projectId)) throw Error('Existing review requires an unstarted task at an idle boundary');
-    if (Object.values(p.tasks).some(x => ['running','reviewing','uncertain'].includes(x.state))) throw Error('Project is not idle');
-    // [AI-added] 2026-09-24 14:02: Imported candidates retain the rules used to capture them.
-    const cfg = snapshotApi.workspacePolicy(p.workspace, p.snapshotPolicy), candidate = this.createSnapshot(p.workspace, cfg);
-    this.store.change(s => {
-      const q = s.projects[projectId].tasks[taskId]; q.artifactId = candidate.id; q.artifactHash = candidate.hash;
-      q.snapshotPolicy = cfg; q.changedFiles = Object.keys(candidate.files).filter(f => allowed(f, q.allowedPaths));
-      q.reviewOnly = true;
-      q.reviewMode = 'existing-candidate'; q.workerReport = { summary: evidence, note: 'Existing candidate imported by operator. No synthetic worker run or before/after diff; listed paths are review scope.' };
-      q.state = 'review_ready'; q.resumePhase = 'brain'; q.error = null;
-      this.store.event(s, 'existing_review_prepared', { projectId, taskId, artifactId: candidate.id });
-    });
-  }
-  needsRepairAuthorization(t) {
-    // First-attempt evidence also covers legacy queues whose reviewMode became worker-diff.
-    return !t.repairAuthorized && (t.reviewOnly || t.reviewMode === 'existing-candidate' || t.attempts[0]?.role === 'brain');
-  }
   // [AI-added] 2026-09-17 11:46
   assertReviewWorkspace(p,t,snapshotPolicy,stage) {
     const candidate=loadSnapshot(this.artifacts,t.artifactId),live=manifest(p.workspace,snapshotPolicy),changed=difference(candidate.files,live);
@@ -193,48 +168,6 @@ class Dispatcher {
     const signature=sha(JSON.stringify({artifactHash:t.artifactHash,changed}));
     if(t.controlDrift?.at(-1)?.signature===signature)return;
     this.store.change(s=>{const q=s.projects[p.id].tasks[t.id];q.controlDrift||=[];q.controlDrift.push({at:new Date().toISOString(),stage,signature,paths:changed});this.store.event(s,'review_control_drift_accepted',{projectId:p.id,taskId:t.id,summary:changed.join(', ')});});
-  }
-  reconcileReview(projectId,taskId,input) {
-    if(this.store.state.projects[projectId]?.tasks[taskId]?.roundId)throw Error('Stage contracts cannot be rewritten by candidate reconciliation');
-    nonempty(input?.evidence,'Reconciliation evidence');nonempty(input?.instructions,'Review instructions');
-    if(!/^[a-f0-9]{64}$/.test(input?.expectedWorkspaceHash||''))throw Error('Expected workspace hash required');
-    const p=this.store.state.projects[projectId],t=p?.tasks[taskId];
-    if(!t||t.state!=='blocked'||!t.scopeRecovery||p.completedAt||this.active.has(projectId)||Object.values(p.tasks).some(t=>['running','reviewing','uncertain'].includes(t.state)))throw Error('Reconciliation requires idle project and blocked scope recovery');
-    // [AI-added] 2026-09-24 14:02: Freeze rules when reconciling an old candidate.
-    const cfg=t.snapshotPolicy ? snapshotApi.policy(t.snapshotPolicy) : snapshotApi.workspacePolicy(p.workspace,p.snapshotPolicy);
-    if(sha(JSON.stringify(manifest(p.workspace,cfg)))!==input.expectedWorkspaceHash)throw Error('Workspace changed since operator inspection');
-    const candidate=this.createSnapshot(p.workspace,cfg);
-    if(candidate.hash!==input.expectedWorkspaceHash)throw Error('Workspace changed while preparing reconciliation');
-    const original=loadSnapshot(this.artifacts,t.scopeRecovery.originalBaselineId);
-    this.store.change(s=>{
-      const q=s.projects[projectId].tasks[taskId];q.reconciliations||=[];
-      q.reconciliations.push({at:new Date().toISOString(),evidence:input.evidence,scopeRecovery:q.scopeRecovery,scopeAlert:q.scopeAlert,instructions:q.instructions,workerReport:q.workerReport,candidateId:candidate.id,candidateHash:candidate.hash});
-      q.instructionHistory ||= [];
-      q.instructionHistory.push({contractRevision:q.contractRevision||1,instructions:q.instructions,acceptance:q.acceptance,at:new Date().toISOString(),reason:'scope reconciliation'});
-      q.contractRevision=(q.contractRevision||1)+1;
-      q.instructions=input.instructions;q.artifactId=candidate.id;q.artifactHash=candidate.hash;q.snapshotPolicy=cfg;
-        q.changedFiles=difference(original.files,candidate.files).filter(f=>require('./scope-recovery.cjs').writable(f,q.allowedPaths,q.id));
-      q.workerReport={summary:input.evidence,note:'Operator-reconciled existing deliverable; original worker receipts retained. No new worker execution claimed.'};
-      q.state='review_ready';q.resumePhase='brain';q.error=null;q.blockKind=null;q.reviewMode='operator-reconciled';
-      delete q.scopeRecovery;delete q.scopeRecoveryRequested;if(q.scopeAlert)q.scopeAlert.acknowledged=true;
-      this.store.event(s,'scope_reconciled_for_review',{projectId,taskId,artifactId:candidate.id,evidence:input.evidence});
-    });
-  }
-  configureRepair(projectId, taskId, input) {
-    if(this.store.state.projects[projectId]?.tasks[taskId]?.roundId)throw Error('Executed stage contracts are frozen; plan new repair tasks after final review');
-    nonempty(input?.instructions, 'Repair instructions'); nonempty(input?.acceptance, 'Repair acceptance');
-    if (this.active.has(projectId)) throw Error('Project still running');
-    this.store.change(s => {
-      const p = s.projects[projectId], t = p?.tasks[taskId];
-      if (!t || t.state !== 'blocked' || p.completedAt || Object.values(p.tasks).some(x => ['running','reviewing','uncertain'].includes(x.state))) throw Error('Repair requires a blocked task and idle project');
-      if (!t.findings?.length || t.review?.verdict !== 'needs_fix') throw Error('Repair requires review findings');
-      t.instructionHistory ||= [];
-      t.instructionHistory.push({ contractRevision:t.contractRevision||1,instructions: t.instructions, acceptance: t.acceptance, at: new Date().toISOString(), reason:'repair configuration' });
-      t.instructions = input.instructions; t.acceptance = input.acceptance;
-      t.contractRevision=(t.contractRevision||1)+1;
-      t.repairAuthorized = true; t.resumePhase = 'worker';
-      this.store.event(s, 'repair_configured', { projectId, taskId, contractRevision:t.contractRevision });
-    });
   }
   reviseTask(projectId, taskId, input, reason) {
     const stageProject=this.store.state.projects[projectId],stageTask=stageProject?.tasks[taskId];
@@ -267,11 +200,11 @@ class Dispatcher {
         if (deps.includes(targetId) || deps.some(dep => taskReferences(p, dep, targetId))) throw Error('Replacement task cannot depend on the blocked task it supersedes: ' + targetId);
       }
       t.instructionHistory ||= [];
-      t.instructionHistory.push({ contractRevision: t.contractRevision || 1, title: t.title, instructions: t.instructions, acceptance: t.acceptance,
+      t.instructionHistory.push({ contractRevision: t.contractRevision, title: t.title, instructions: t.instructions, acceptance: t.acceptance,
         allowedPaths: t.allowedPaths, dependsOn: t.dependsOn || [], supersedes: t.supersedes || [], supersedeReason: t.supersedeReason || null,
         validationProfile: t.validationProfile || null, at: new Date().toISOString(), reason: reason.trim() });
       Object.assign(t, { title: input.title, instructions: input.instructions, acceptance: input.acceptance, allowedPaths: input.allowedPaths,
-        dependsOn: deps, contractRevision: (t.contractRevision || 1) + 1 });
+        dependsOn: deps, contractRevision: t.contractRevision + 1 });
       if (supersedes.length) { t.supersedes = supersedes; t.supersedeReason = input.supersedeReason.trim(); }
       else { delete t.supersedes; delete t.supersedeReason; }
       if (input.validationProfile) t.validationProfile = input.validationProfile; else delete t.validationProfile;
@@ -296,7 +229,6 @@ class Dispatcher {
       const p = s.projects[projectId], t = p?.tasks[taskId];
       if (!t || !['blocked', 'uncertain'].includes(t.state)) throw Error('Task is not blocked/uncertain');
       if (t.state === 'uncertain' && confirmedStopped !== true) throw Error('Confirm old agent/background processes have stopped before retry');
-      if ((restartWorker || t.resumePhase !== 'brain') && this.needsRepairAuthorization(t)) throw Error('Review-only task requires configure-repair before worker retry');
       t.state = !restartWorker && t.resumePhase === 'brain' && t.artifactId ? 'review_ready' : 'ready';
       t.error = null; t.blockKind = null; t.repairs = 0;
       // [AI-added] 2026-09-19: An explicit retry settles the outstanding brain attention; a later ack stays idempotent.
@@ -364,7 +296,7 @@ class Dispatcher {
       if (!['running', 'reviewing'].includes(t.state)) continue;
       const run = t.attempts.at(-1), receiptPath = this.receiptPath(run.id);
       if (fs.existsSync(receiptPath)) this.settle(p.id, t.id, run.id, read(receiptPath));
-      else if (p.mode === 'desktop' && run.delivery) continue;
+      else if (run.delivery) continue;
       else this.block(p.id, t.id, run.id, 'uncertain', 'Service stopped before a durable receipt; reconcile agent before retry');
     }
   }
@@ -390,6 +322,7 @@ class Dispatcher {
     if (!run || run.id !== runId || run.settled) return false;
     try {
       if (receipt.attemptId !== runId || receipt.role !== run.role) throw Error('Receipt identity mismatch');
+      snapshotApi.frozenPolicy(run.snapshotPolicy);
       if (receipt.usage) {
         const usage = require('./usage.cjs').normalize(receipt.usage);
         this.store.change(s => { s.projects[projectId].tasks[taskId].attempts.at(-1).usage = usage; });
@@ -397,9 +330,7 @@ class Dispatcher {
       const result = parseResult(receipt.text, { projectId, taskId, attemptId: runId, role: run.role, artifactId: run.artifactId });
       if (run.role === 'worker') {
         const candidate = loadSnapshot(this.artifacts, receipt.artifactId), before = loadSnapshot(this.artifacts, run.baselineId);
-        // [AI-added] 2026-09-20: Compare monitored scope only; candidates recorded before the
-        // IDE-cache rule still list dot folders that a fresh manifest no longer includes.
-        if (snapshotApi.monitoredHash(manifest(p.workspace, run.snapshotPolicy)) !== snapshotApi.storedMonitoredHash(candidate)) throw Error('Workspace changed after completion snapshot');
+        if (snapshotApi.monitoredHash(manifest(p.workspace, run.snapshotPolicy)) !== candidate.monitoredHash) throw Error('Workspace changed after completion snapshot');
         const scope=require('./scope-recovery.cjs').check(this,p,t,run,candidate,result,receipt);
         if(!scope)return false;
         const changed=scope.changed;
@@ -407,7 +338,7 @@ class Dispatcher {
           const task = s.projects[projectId].tasks[taskId];
           task.artifactId = candidate.id; task.artifactHash = candidate.hash; task.changedFiles = changed; task.workerReport = result;
           delete task.preReview; delete task.stageHeld;
-          task.snapshotPolicy = run.snapshotPolicy; task.reviewMode = 'worker-diff';
+          task.snapshotPolicy = run.snapshotPolicy;
           delete task.scopeRecovery;
           task.state = result.status === 'blocked' ? 'blocked' : 'review_ready';
           task.resumePhase = 'worker'; task.error = result.status === 'blocked' ? result.summary : null;
@@ -425,7 +356,8 @@ class Dispatcher {
         }
       } else {
         if (run.role !== 'reviewer') throw Error('Individual final review is removed; use stage-submit');
-        if (receipt.reviewChanged || receipt.reviewChanges?.length) throw Error('Reviewer changed its input files'+(receipt.reviewChanges?.length?': '+receipt.reviewChanges.slice(0,20).map(c=>c.kind+' '+c.path).join(', ').slice(0,2000):''));
+        if (!Array.isArray(receipt.reviewChanges)) throw Error('Review receipt requires reviewChanges');
+        if (receipt.reviewChanges.length) throw Error('Reviewer changed its input files: '+receipt.reviewChanges.slice(0,20).map(c=>c.kind+' '+c.path).join(', ').slice(0,2000));
         if (run.validation && result.verdict === 'pass' && run.validation.mode !== 'static' && !run.validation.passed) throw Error('Required validation checks failed; cannot accept candidate');
         // [AI-added] 2026-09-17 11:46
         this.assertReviewWorkspace(p,t,run.snapshotPolicy,'settle');
@@ -436,10 +368,8 @@ class Dispatcher {
           require('./stage-review.cjs').held(s.projects[projectId],task,run,result);
           if (result.verdict === 'pass') task.state = 'review_ready';
           else if (result.verdict === 'blocked') task.state = 'blocked';
-          else if (this.needsRepairAuthorization(task)) task.state = 'blocked';
           else { task.repairs++; task.state = task.repairs <= 2 ? 'ready' : 'blocked'; }
           task.error = task.state === 'blocked' ? result.summary + (task.repairs > 2 ? ' (automatic repair limit reached)' : '') : null;
-          if (result.verdict === 'needs_fix' && this.needsRepairAuthorization(task)) task.error = result.summary + ' (review-only task; configure-repair required before implementation)';
           task.resumePhase = result.verdict === 'needs_fix' ? 'worker' : 'brain';
           task.blockKind = result.verdict === 'blocked' ? (result.blockKind || 'review') : null;
           task.attempts.at(-1).settled = true;
@@ -469,14 +399,11 @@ class Dispatcher {
     for (const p of Object.values(this.store.state.projects)) require('./goals.cjs').reconcile(this, p.id);
     for (const p of Object.values(this.store.state.projects)) {
       if (p.archivedAt) continue;
-      require('./pre-review.cjs').reconcile(this,p);
       require('./handover.cjs').finish(this,p.id);
-      require('./scope-recovery.cjs').reconcile(this,p.id);
       require('./planning.cjs').reconcile(this.store,p.id);
       if (this.active.size >= (this.config.maxConcurrent || 2)) break;
       if (p.paused || p.completedAt || this.active.has(p.id)) continue;
       if (require('./startup.cjs').waiting(p)) continue;
-      if (p.mode !== 'desktop' && !this.config.enableRealCalls) continue;
       // [AI-added] 2026-09-22 10:20: Only fixed peers advance while preliminary passes are held.
       const batchGate=require('./stage-review.cjs').gate(this,this.store.state.projects[p.id]);
       if(batchGate?.prepare){
@@ -488,7 +415,7 @@ class Dispatcher {
       // An uncertain former writer may still be alive; lock the entire workspace.
       if (Object.values(p.tasks).some(t => t.state === 'uncertain')) continue;
       const liveProject=this.store.state.projects[p.id];
-      const task = Object.values(liveProject.tasks).find(t => (!liveProject.goals || t.goalId === liveProject.activeGoalId) && !t.stageHeld && (!batchGate||t.roundId===batchGate.batch.id) && !attempts.exhausted(t) && ['ready', 'review_ready'].includes(t.state) && (p.mode!=='desktop'||t.state==='review_ready'||matches(liveProject,t)) && t.dependsOn.every(d => require('./stage-review.cjs').dependencyReady(liveProject,t,d)));
+      const task = Object.values(liveProject.tasks).find(t => (!liveProject.goals || t.goalId === liveProject.activeGoalId) && !t.stageHeld && (!batchGate||t.roundId===batchGate.batch.id) && !attempts.exhausted(t) && ['ready', 'review_ready'].includes(t.state) && (t.state==='review_ready'||matches(liveProject,t)) && t.dependsOn.every(d => require('./stage-review.cjs').dependencyReady(liveProject,t,d)));
       if (!task) continue;
       if (task.state==='ready' && !task.scopeRecovery && this.store.state.projects[p.id].planning) continue;
       if (attempts.projectExhausted(p)) { this.pause(p.id, true); continue; }
@@ -509,21 +436,19 @@ class Dispatcher {
     if(role==='worker'&&!t.scopeRecovery&&t.allowedPaths.every(f=>!require('./scope-recovery.cjs').writable(f,t.allowedPaths,t.id))){
       require('./scope-recovery.cjs').alert(this,p,t,'任务仅授权了受保护目录或其他任务的回执路径。请大脑明确执行任务，将回执放到 docs/worker-results/'+t.id+'/，设计与契约留在大脑端；本次未消耗执行回合。');return;
     }
-    const profile = { adapter: 'desktop' }, profileHash = sha(JSON.stringify(profile));
     // [AI-added] 2026-09-24 14:02: A running attempt cannot alter its diff by editing .taskignore.
     // [AI-added] 2026-09-24 14:19: Invalid ignore files are task attention, not dispatcher-fatal errors.
     let snapshotPolicy;
-    try { snapshotPolicy = role === 'worker' ? snapshotApi.workspacePolicy(p.workspace,p.snapshotPolicy) : snapshotApi.policy(t.snapshotPolicy); }
+    try { snapshotPolicy = role === 'worker' ? snapshotApi.workspacePolicy(p.workspace,p.snapshotPolicy) : snapshotApi.frozenPolicy(t.snapshotPolicy); }
     catch (e) {
       this.store.change(s => { const task = s.projects[projectId].tasks[taskId]; task.state = 'blocked'; task.error = e.message; task.resumePhase = role === 'reviewer' ? 'brain' : role; });
       require('./brain-attention.cjs').raise(this, projectId, taskId, e.message);
       return;
     }
-    const binding= p.bindings?.[bindingKey({role,workerId:t.workerId})];
-    const run = { id: runId, role, ...(role==='worker'?{workerId:t.workerId||'default'}:{}), profileHash, snapshotPolicy, contractRevision:t.contractRevision||1,
-      provider: binding?.wake?.provider || profile.adapter, model: binding?.wake?.model || profile.model || null, startedAt: new Date().toISOString(), settled: false };
+    const binding= p.bindings?.[bindingKey({role,workerId:t.currentWorkerId})];
+    const run = { id: runId, role, ...(role==='worker'?{workerId:t.currentWorkerId}:{}), snapshotPolicy, contractRevision:t.contractRevision,
+      provider: binding?.provider || 'desktop', model: binding?.wake?.model || null, startedAt: new Date().toISOString(), settled: false };
     if (binding?.wake) run.usageBinding = structuredClone(binding.wake);
-    run.scopePolicy='separated-v1';
     if(role==='worker' && t.scopeRecovery){
       run.scopeRecovery=structuredClone(t.scopeRecovery);
       run.reviewBaselineId=t.scopeRecovery.originalBaselineId;
@@ -546,23 +471,21 @@ class Dispatcher {
         this.checkStorage(require('./maintenance.cjs').size(path.join(this.artifacts,t.artifactId,'tree')) * 2);
         cwd = path.join(this.store.root, 'reviews', runId, 'tree');
         reviewManifest = reviewCopy(this.artifacts, t.artifactId, cwd, snapshotPolicy);
-        // [AI-added] 2026-09-20: The review copy is re-manifested under the current policy, so
-        // integrity is checked against the stored candidate's monitored scope rather than its
-        // raw file list, which may still contain IDE cache paths from an older rule.
-        if (snapshotApi.monitoredHash(reviewManifest) !== snapshotApi.storedMonitoredHash(loadSnapshot(this.artifacts, t.artifactId))) throw Error('Stored candidate snapshot integrity mismatch');
+        if (snapshotApi.monitoredHash(reviewManifest) !== loadSnapshot(this.artifacts, t.artifactId).monitoredHash) throw Error('Stored candidate snapshot integrity mismatch');
         const evidence = path.join(cwd, '.dispatch-evidence');
         if (fs.existsSync(evidence)) throw Error('Reserved .dispatch-evidence path exists');
         // The reviewer can inspect BEFORE and AFTER, including pre-existing untracked files.
         const workerRun = t.attempts.findLast(a => a.role === 'worker');
+        if (!workerRun) throw Error('Preliminary review requires a submitted worker candidate');
         fs.mkdirSync(evidence, { recursive: true });
-        for (const name of workerRun ? t.changedFiles : []) {
+        for (const name of t.changedFiles) {
           const source = path.join(this.artifacts, workerRun.reviewBaselineId || workerRun.baselineId, 'tree', name);
           if (fs.existsSync(source)) {
             const dest = path.join(evidence, 'before', name); fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.copyFileSync(source, dest);
           }
         }
-        atomic(path.join(evidence, 'changes.json'), { reviewMode: t.reviewMode || 'worker-diff', changedFiles: workerRun ? t.changedFiles : [], reviewPaths: t.changedFiles, beforeDirectory: workerRun ? '.dispatch-evidence/before' : null, candidateDirectory: '.', workerReport: t.workerReport });
-        if(workerRun?.scopeRecovery)atomic(path.join(evidence,'scope-recovery.json'),workerRun.scopeRecovery);
+        atomic(path.join(evidence, 'changes.json'), { changedFiles: t.changedFiles, reviewPaths: t.changedFiles, beforeDirectory: '.dispatch-evidence/before', candidateDirectory: '.', workerReport: t.workerReport });
+        if(workerRun.scopeRecovery)atomic(path.join(evidence,'scope-recovery.json'),workerRun.scopeRecovery);
         // Evidence duplicates source; limits protect project snapshots, not generated evidence size.
         run.reviewPolicy = { ...snapshotPolicy, maxTotalBytes: Number.MAX_SAFE_INTEGER, maxFileBytes: Number.MAX_SAFE_INTEGER };
         reviewManifest = manifest(cwd, run.reviewPolicy);

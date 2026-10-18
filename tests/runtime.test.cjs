@@ -11,6 +11,24 @@ test('legacy state and headless single-task projects are rejected without rewrit
  const x=await setup(t);assert.throws(()=>x.d.addProject({id:'old',workspace:x.workspace,brain:'a',worker:'a'}),/headless/);
  const oldRoot=path.join(x.dir,'old');atomic(path.join(oldRoot,'state.json'),{version:1,projects:{},events:[]});const before=fs.readFileSync(path.join(oldRoot,'state.json'));assert.throws(()=>new Store(oldRoot),/not migrated/);assert.deepEqual(fs.readFileSync(path.join(oldRoot,'state.json')),before);
 });
+
+test('incomplete version-two state is rejected without upgrading fields or leaving a lock',async t=>{
+ const x=await setup(t);x.task('A');
+ const mutations=[p=>delete p.projectBudgetEnabled,p=>delete p.tasks.A.currentWorkerId,p=>delete p.tasks.A.plannedRequiredCapability];
+ for(const [index,mutate]of mutations.entries()){
+  const state=structuredClone(x.store.state);mutate(state.projects.p);const root=path.join(x.dir,'incomplete-'+index),file=path.join(root,'state.json');atomic(file,state);
+  const bytes=fs.readFileSync(file);assert.throws(()=>new Store(root),/Unsupported (project|task) structure/);
+  assert.deepEqual(fs.readFileSync(file),bytes);assert.equal(fs.existsSync(path.join(root,'service.lock')),false);
+ }
+});
+
+test('review receipt with only the retired boolean cannot pass settlement',async t=>{
+ const x=await setup(t);x.task('A');x.register(x.definition(['A']));
+ const w=await x.claim('worker');fs.writeFileSync(path.join(x.workspace,'A.txt'),'A');await x.submit(w);
+ const r=await x.claim('reviewer');x.d.pause('p',true);const settle=x.d.settle;x.d.settle=()=>false;await x.submit(r);x.d.settle=settle;
+ const file=x.d.receiptPath(r.attemptId),receipt=JSON.parse(fs.readFileSync(file,'utf8'));delete receipt.reviewChanges;receipt.reviewChanged=false;atomic(file,receipt);
+ x.d.recover();assert.equal(x.p().tasks.A.state,'blocked');assert.match(x.p().tasks.A.error,/requires reviewChanges/);
+});
 test('worker identity spoofing blocks the candidate and cannot issue a verdict',async t=>{
  const x=await setup(t);x.task('A');x.register(x.definition(['A']));const j=await x.claim('worker');
  assert.throws(()=>x.desktop.submit(x.identities.worker,{taskId:'A',attemptId:j.attemptId,result:{projectId:'p',taskId:'A',attemptId:j.attemptId,role:'brain',verdict:'pass',summary:'spoof'}}),/identity/);assert.notEqual(x.p().tasks.A.state,'accepted');

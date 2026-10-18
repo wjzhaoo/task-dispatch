@@ -3,6 +3,11 @@ const {test}=require('node:test'),assert=require('node:assert/strict');
 const modulePromise=import('../runtime/console-web/task-board.mjs');
 const task=(id,dependsOn=[],extra={})=>({id,title:id,state:'ready',dependsOn,attempts:[],...extra});
 const round=(id,stageId,ids,extra={})=>({id,stageId,state:'collecting',members:ids.map(taskId=>({taskId})),reviewTaskIds:ids,...extra});
+
+test('worker search uses the current assignment after reassignment',async()=>{
+ const {buildBoard,matchesTask}=await modulePromise,b=buildBoard({tasks:[task('A',[],{plannedWorkerId:'economy',currentWorkerId:'specialist'})]});
+ assert.equal(matchesTask(b.tasks[0],b,{query:'specialist'}),true);assert.equal(matchesTask(b.tasks[0],b,{query:'economy'}),false);
+});
 test('whole-project totals remain independent of search and completed-task filters',async()=>{
  const {buildBoard,matchesTask}=await modulePromise,p={tasks:[task('A',[],{state:'accepted'}),task('B'),task('C',[],{state:'resolved'}),task('D',[],{state:'blocked'})]},b=buildBoard(p);
  assert.deepEqual(b.counts,{total:4,accepted:1,resolved:1,complete:2,brain:0,attention:1});

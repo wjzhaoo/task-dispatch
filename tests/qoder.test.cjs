@@ -12,7 +12,6 @@ const { Dispatcher } = require('../runtime/core/dispatcher.cjs');
 const { Desktop } = require('../runtime/core/desktop.cjs');
 const { Wake } = require('../runtime/core/wake.cjs');
 const { install } = require('../scripts/install.js');
-const attempts = require('../runtime/core/attempts.cjs');
 const exec = promisify(execFile);
 
 const tempRoot = path.resolve('tmp');
@@ -25,9 +24,10 @@ async function bridgeFixture(t, options = {}) {
   fs.cpSync(source, pluginRoot, { recursive: true });
   const descriptorPath = descriptorFile(configDir);
   fs.writeFileSync(path.join(pluginRoot, 'bridge-config.json'), JSON.stringify({ version: 1, descriptorPath }));
-  const sent = [], states = options.states || new Map();
+  const sent = [], observed = [], states = options.states || new Map();
   const chat = {
     observeTurn: async ({ sessionId }, callback) => {
+      observed.push(sessionId);
       if (options.missing === sessionId) throw Error('APP_PLUGIN_SESSION_UNAVAILABLE');
       queueMicrotask(() => callback(states.get(sessionId) || { sessionId, runtimeState: 'ready', activeTurnId: null }));
       return { dispose() {} };
@@ -49,7 +49,7 @@ async function bridgeFixture(t, options = {}) {
     for (let attempt = 0; attempt < 60 && alive(pid); attempt++) await new Promise(resolve => setTimeout(resolve, 250));
     if (alive(pid)) throw Error('Fixture service still running: pid ' + pid);
   });
-  return { root, configDir, descriptorPath, sent, adapter: new QoderWake({ descriptorPath }) };
+  return { root, configDir, descriptorPath, sent, observed, adapter: new QoderWake({ descriptorPath }) };
 }
 
 test('Qoder bridge reads state and sends directly without a listener lease', async t => {
@@ -114,17 +114,49 @@ test('Qoder prompt handshake ignores ambiguous markers and expired records', asy
   assert.deepEqual(await new QoderWake({configDir:f.configDir,descriptorPath:f.descriptorPath}).discoverInvitation({invitationId:first,workspace}),[]);
 });
 
+test('Qoder handshake keeps one identity immutable, skips duplicate writes and rejects retired input aliases',t=>{
+  const root=workdir('qoder-handshake-'),configDir=path.join(root,'config'),workspace=path.join(root,'work');fs.mkdirSync(workspace);
+  const hook=path.resolve('skills/task-dispatch/qoder-invitation-hook.cjs'),invitationId=crypto.randomUUID(),file=path.join(configDir,'task-dispatch-invitations',invitationId+'.json');
+  const prompt=`[TASK-DISPATCH-INVITE:${invitationId}]`,run=input=>{const value=spawnSync(process.execPath,[hook,'--config-dir',configDir],{input:JSON.stringify(input),encoding:'utf8',windowsHide:true});assert.equal(value.status,0,value.stderr);};
+  run({sessionId:'alias-session',workspace,prompt});assert.equal(fs.existsSync(file),false);
+  run({session_id:'real-session',cwd:workspace,prompt});const before=fs.readFileSync(file),mtime=fs.statSync(file).mtimeMs;
+  run({session_id:'real-session',cwd:workspace,prompt});assert.deepEqual(fs.readFileSync(file),before);assert.equal(fs.statSync(file).mtimeMs,mtime);
+  const adapter=new QoderWake({configDir,env:{},home:root,fetch:()=>assert.fail('Local invitation resolution must not call the bridge')});
+  assert.equal(adapter.resolveInvitation({invitationId,workspace})[0].id,'real-session');
+  run({session_id:'another-session',cwd:workspace,prompt});assert.equal(JSON.parse(fs.readFileSync(file)).ambiguous,true);
+  assert.throws(()=>adapter.resolveInvitation({invitationId,workspace}),/multiple sessions/);
+  run({session_id:'real-session',cwd:workspace,prompt});assert.throws(()=>adapter.resolveInvitation({invitationId,workspace}),/multiple sessions/);
+});
+
+test('Qoder and QoderCN keep the verified bridge for both reads and sends',async t=>{
+  const sessionId='qoder-selected-session',wrong=await bridgeFixture(t,{missing:sessionId}),selected=await bridgeFixture(t),workspace=path.join(selected.root,'work');fs.mkdirSync(workspace);
+  const adapter=new QoderWake({descriptorPath:wrong.descriptorPath}),binding={threadId:sessionId,workspace,descriptorPath:selected.descriptorPath};
+  assert.equal((await adapter.read(binding)).thread.id,sessionId);
+  await adapter.send(binding,'[TASK-DISPATCH-WAKE:selected] claim');
+  assert.deepEqual(wrong.observed,[]);assert.deepEqual(selected.observed,[sessionId]);assert.equal(wrong.sent.length,0);assert.equal(selected.sent.length,1);
+});
+
 test('Qoder first connect resolves the invitation without a manual session ID', async t => {
   const f = await bridgeFixture(t), workspace = path.join(f.root, 'work'), dataRoot = path.join(f.root, 'data'); fs.mkdirSync(workspace);
   const invitationId = crypto.randomUUID(), sessionId = 'qoder-invited-worker';
   spawnSync(process.execPath, [path.resolve('skills/task-dispatch/qoder-invitation-hook.cjs'), '--config-dir', f.configDir], {
     input: JSON.stringify({ session_id:sessionId,cwd:workspace,prompt:`[TASK-DISPATCH-INVITE:${invitationId}]` }),encoding:'utf8',windowsHide:true
   });
-  const {stdout}=await exec(process.execPath,[path.resolve('runtime/desktop-client.cjs'),'connect','--provider','qoder','--invitation-id',invitationId,
-    '--role','worker','--worker-id','qoder-first','--workspace',workspace,'--data',dataRoot],{
-    cwd:workspace,windowsHide:true,env:{...process.env,QODER_CONFIG_DIR:f.configDir}
-  });
-  const result=JSON.parse(stdout);assert.equal(result.attached,true);assert.equal(result.role,'worker');assert.equal(result.parked,true);
+  require('../runtime/wizard.cjs').initialize(dataRoot);
+  const service=await require('./service-fixture.cjs').serve(dataRoot,{wakeAdapter:{forProvider:()=>f.adapter}});
+  service.monitor.tick=()=>{};service.monitor.wake.tick=()=>{};
+  try {
+    const run=()=>exec(process.execPath,[path.resolve('runtime/desktop-client.cjs'),'connect','--provider','qoder','--invitation-id',invitationId,
+      '--role','worker','--worker-id','qoder-first','--workspace',workspace,'--data',dataRoot],{
+      cwd:workspace,windowsHide:true,env:{...process.env,QODER_CONFIG_DIR:f.configDir}
+    });
+    const result=JSON.parse((await run()).stdout);assert.equal(result.attached,true);assert.equal(result.role,'worker');assert.equal(result.parked,true);
+    assert.deepEqual(f.observed,[sessionId],'the service performs the only host verification');
+    const before=fs.readFileSync(path.join(dataRoot,'state.json')),credential=fs.readFileSync(result.credential);
+    assert.equal(JSON.parse((await run()).stdout).credential,result.credential);
+    assert.deepEqual(f.observed,[sessionId]);assert.deepEqual(fs.readFileSync(path.join(dataRoot,'state.json')),before);assert.deepEqual(fs.readFileSync(result.credential),credential);
+    const binding=Object.values(service.store.state.projects)[0].bindings['worker:qoder-first'];assert.equal(binding.wake.descriptorPath,f.descriptorPath);
+  } finally {await service.close();}
 });
 
 test('Qoder state mapping keeps active work from receiving a competing wake', () => {
@@ -199,44 +231,24 @@ test('Qoder repair disables itself after repeated launch failures', async t => {
   assert.equal((await f.adapter.repairBridge(error)).reason, 'disabled-after-repeated-failures');
 });
 
-test('legacy Qoder bindings acquire their project workspace without resume', () => {
-  const state = { projects: { p: { workspace: 'D:\\work', bindings: { reviewer: { wake: { provider: 'qoder', threadId: 'old-session' } } }, tasks: {} } } };
-  attempts.migrate(state);
-  assert.equal(state.projects.p.bindings.reviewer.wake.workspace, 'D:\\work');
+test('persisted Qoder bindings must already contain their verified workspace',()=>{
+ const state={version:2,revision:0,events:[],projects:{p:{id:'p',mode:'desktop',maxTurns:null,projectBudgetEnabled:false,turns:0,workspace:'D:\\work',tasks:{},bindings:{reviewer:{provider:'qoder',sessionId:'session',wake:{provider:'qoder',threadId:'session'}}}}}};
+ const before=structuredClone(state);assert.throws(()=>require('../runtime/core/storage.cjs').validateState(state),/Qoder binding workspace/);assert.deepEqual(state,before);
 });
 
 // [AI-added] 2026-09-16 16:43
-test('legacy Qoder hook refuses to guess a workspace when no data root is explicit', () => {
-  const root = workdir('qoder-hook-root-'), skill = path.join(root, 'skill');
-  fs.mkdirSync(skill);
-  fs.copyFileSync(path.resolve('skills/task-dispatch/qoder-hook.cjs'), path.join(skill, 'qoder-hook.cjs'));
-  fs.writeFileSync(path.join(skill, 'runtime-link.json'), JSON.stringify({
-    version: 2,
-    client: path.resolve('runtime/desktop-client.cjs'),
-    dataMode: 'workspace-sibling-v1'
-  }));
-  const result = spawnSync(process.execPath, [path.join(skill, 'qoder-hook.cjs'), 'stop'], {
-    cwd: root,
-    input: JSON.stringify({ hook_event_name: 'Stop' }),
-    encoding: 'utf8',
-    env: { ...process.env, TASK_DISPATCH_DATA: '' },
-    windowsHide: true
-  });
-  assert.equal(result.status, 0);
-  assert.match(result.stderr, /workspace is missing; provide host workspace metadata or --data/);
-  assert.equal(fs.readdirSync(root).some(entry => entry.endsWith('.task-dispatch-service')), false);
-});
+
 
 test('task dispatch delivers to Qoder after park without hook state', async t => {
   const f = await bridgeFixture(t), workspace = path.join(f.root, 'work'); fs.mkdirSync(workspace);
   const dataRoot = path.join(f.root, 'data'), store = new Store(dataRoot); t.after(() => store.close());
-  const dispatcher = new Dispatcher(store, { enableRealCalls: false }, () => { throw Error('no model'); });
+  const dispatcher = new Dispatcher(store,{maxConcurrent:2});
   const desktop = new Desktop(dispatcher), sessionId = 'qoder-session-worker';
   desktop.attach({ workspace, role: 'worker', clientId: 'worker-client', token: 'a'.repeat(64), sessionId });
   store.change(state => { for (const project of Object.values(state.projects)) project.startup = { state: 'started' }; });
   const identity = desktop.authenticate('a'.repeat(64));
   const wake = new Wake(desktop, { forProvider: provider => { assert.equal(provider, 'qoder'); return f.adapter; } });
-  await wake.bind(identity, { provider: 'qoder', threadId: sessionId, experimentalAcknowledged: true });
+  await wake.bind(identity, { provider: 'qoder', threadId: sessionId });
   assert.equal(wake.park(identity).parked, true);
   dispatcher.addTask(identity.projectId, { id: 'T', title: 't', instructions: 'i', acceptance: 'a', allowedPaths: ['README.md'] });
   require('./stage-fixture.cjs').begin(dispatcher);

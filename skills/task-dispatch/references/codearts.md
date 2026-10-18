@@ -1,51 +1,31 @@
 # CodeArts 原会话接入
 
-0.4.0 支持 CodeArts（参数 `codearts`，兼容 `codeartsdoer`）的已有会话唤醒。MiMo、Codex 的唤醒适配器同样默认注册；不需要额外启用平台开关。绑定仍需真实会话信息，绑定后 `park` 才会允许发送通知。
+CodeArts（`--provider codearts`，兼容 `codeartsdoer`）支持已有 brain、reviewer 和 worker 会话唤醒。它使用独立 Hook bridge，与 OpenCode 2.x 的数据库和 CLI 适配器分开。不能因 CodeArts 使用 OpenCode 内核就改传 `--provider opencode`。
 
-```mermaid
-flowchart LR
-  A[安装技能与 Hook] --> B[重启 CodeArts]
-  B --> C[Hook 写入本机会话发现文件]
-  C --> D[接入并绑定真实会话]
-  D --> E[领取与提交任务]
-  E --> F[空闲挂起]
-  F --> G[服务检查会话并发送通知]
-  G --> E
-```
+## 桥接前提
 
-## 安装
+已有 CodeArts Hook 环境需加载本仓库的 `skills/task-dispatch/codearts-hook.mjs`。当前 Skill 安装器支持 Codex、MiMo、Qoder/QoderCN 和 OpenCode，不自动安装 CodeArts；新环境须先按 CodeArts 的插件配置方式加载 Hook，再重新加载宿主。
 
-当前 Skill 安装器仅面向 brain 平台，不再接受 `codearts` / `codeartsdoer`。CodeArts 只保留为已有 worker Hook 环境的运行时兼容适配器；新环境不应通过 task-dispatch 安装器部署 CodeArts Skill 或 Hook。已有 Hook 环境升级时需由其原部署方式维护，并在变更后重启 CodeArts。
+Hook 通过宿主已认证的 SDK 访问会话，并建立随机 Bearer token 保护的本机 HTTP bridge。描述文件位于 `~/.codeartsdoer/task-dispatch/`：`bridge.json` 记录项目端点，`<sha256(sessionId)>.json` 记录具体会话。适配器每次请求重新读取端口和凭据，优先使用具体会话文件。凭据内容不得粘贴、记录到日志或提交仓库。
 
-Hook 使用当前进程的 `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD` 和插件上下文 `serverUrl`，按会话 ID 的 SHA-256 文件名写入 `~/.codeartsdoer/task-dispatch/`。同机多个会话分别发现，每次请求重新读取端口和凭据。凭据文件不得提交、粘贴或输出到日志。Hook 不发送消息、不接管角色、不自动领取任务。
+IDE 重启时，通用描述文件可能先刷新，具体会话文件仍保留旧端口。仅旧端口明确拒绝连接（`ECONNREFUSED`）时，适配器才改读同工作区的 `bridge.json`，以新端口和凭据访问原会话；新桥接尚未就绪时，待发通知保留并在后续调度重试。其他工作区的桥接、用户显式指定的描述文件、连接重置和超时均不会触发自动切换。恢复后继续用原凭据执行 `resume`。
 
-若 CodeArts 版本没有提供 `serverUrl` 或密码环境变量，Hook 不生成发现信息，需要核实该版本插件接口；不能把安装成功当作连接成功，也不从其他进程的 StartInfo 猜测密码。
+## 首次接入
 
-## 绑定
-
-先按 [桌面接入](desktop.md) 执行 `connect` 或 `attach`，确认当前角色与项目。读取平台提供的当前 session ID，不按标题猜测，也不使用其他窗口 ID。宿主界面给不出会话 ID 时，用受支持的只读通道定位，不要自己翻宿主数据：
-
-1. 先把该角色当前的邀请或改绑提示词原样发给这个 CodeArts 会话——其中带 `[TASK-DISPATCH-INVITE:<uuid>]` 标识，Hook 同时按会话写出 `~/.codeartsdoer/task-dispatch/<sha256(sessionId)>.json`。
-2. 再执行只读诊断，按项目目录匹配该标识，唯一命中才可用：
+使用宿主提供的真实会话 ID；缺少时，将含 `[TASK-DISPATCH-INVITE:<uuid>]` 的邀请原文发给目标 CodeArts 会话，再通过 bridge 唯一匹配邀请：
 
 ```powershell
 node "<客户端脚本>" discover-session --provider codearts --invitation-id "<uuid>" --workspace "<项目绝对路径>"
 ```
 
-3. 返回 `identified:false`（未命中或多条歧义）时停止并报告缺项，向用户索要真实会话 ID。禁止手工打开宿主 `opencode.db` 或任何宿主数据库查 `session` 表——邀请文案明确不读宿主数据库，按目录或更新时间猜会话同样不允许。
-
-随后执行：
+未命中或命中多个会话时，按回执处理；不按目录、标题或更新时间猜测，不改读 OpenCode 2.x 数据库。
 
 ```powershell
-node "<客户端脚本>" wake-bind --provider codearts --thread-id "<真实session ID>" --credential "<本会话凭据文件>" --data "<服务数据目录>"
-node "<客户端脚本>" claim --credential "<本会话凭据文件>" --data "<服务数据目录>"
-node "<客户端脚本>" park --credential "<本会话凭据文件>" --data "<服务数据目录>"
+node "<客户端脚本>" connect --provider codearts --role worker --worker-id "<编号>" --session-id "<真实会话 ID>" --workspace "<项目绝对路径>" --data "<服务目录>"
 ```
 
-CodeArts 不需要 Codex turnId。可选 `--model provider/model` 明确模型，否则由平台沿用会话模型。0.4.0 客户端默认开启实验性绑定，旧 `--experimental` 参数继续兼容；`wake-disable` 仍可关闭。MiMo 必须提供明确的 `--model provider/model`。
+Web 邀请还须保留原命令的 `--join-invitation` 等参数。连接只读取指定会话，验证身份与项目目录后保存绑定并自动待命。CodeArts 不需要 Codex 的 turnId；可选 `--model provider/model`，省略时沿用会话模型，不填写猜测的模型名。
 
-新建会话不能复用同目录旧会话的发现文件 ID。核对平台会话历史中的当前初始提示，确认 session ID 后再接入；仅目录相同不足以证明身份。界面只显示裸模型名时省略 `--model`，不要将裸模型名作为完整 provider/model 传入。
+返回 `parked:true` 后结束回合，返回 `job` 则处理任务。提交后执行 `resume --credential "<本端凭据路径>" --data "<服务目录>"`，复用原绑定。不要调用已移除的 `attach`、`wake-bind` 或 `wake-disable`。
 
-使用 OpenCode HTTP 接口读取会话、历史和状态，通过 `POST /session/{id}/prompt_async` 发送 UTF-8 通知，只有 204 确认为接收。异步接口避免同步等模型回复阻塞调度；不支持该接口时显示错误，不盲目回退重发。接收不等于任务完成，仍须 claim、submit、park。忙碌时等待，送达不确定时核对历史标记。
-
-接口依据：[OpenCode Server](https://opencode.ai/docs/server/)、[插件接口定义](https://github.com/anomalyco/opencode/blob/dev/packages/plugin/src/index.ts)。CodeArts 的具体版本仍需真实环境联调。
+服务在会话空闲时通过 bridge 的异步 prompt 接口发送通知；HTTP 204 仅表示接收，任务仍须领取、提交和审核。超时或响应不确定时核对历史标记，不盲目重发。缺失或失效的 bridge 会报告具体错误，不自动降级为 wait 或路由至其他平台。

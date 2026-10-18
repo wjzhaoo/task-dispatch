@@ -15,9 +15,6 @@ fs.cpSync(path.resolve(__dirname, '../qoder-app-plugin'), path.join(root, 'qoder
 fs.writeFileSync(path.join(root, '.codex-plugin/plugin.json'), JSON.stringify({ version: '0.1.0' }));
 const source = path.join(root, 'skills/task-dispatch/SKILL.md');
 // [AI-added] 2026-09-14 17:19
-/* Previous fixture:
-fs.writeFileSync(source, 'version one');
-*/
 fs.writeFileSync(source, '---\nname: task-dispatch\ndescription: verification fixture\n---\n\nversion one');
 const options = { platforms: Object.keys(PLATFORMS), home, root };
 assert.deepEqual(Object.keys(PLATFORMS), ['codex', 'mimo', 'qoder', 'qodercn', 'opencode']);

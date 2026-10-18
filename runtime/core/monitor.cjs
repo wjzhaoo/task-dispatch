@@ -1,5 +1,6 @@
 // [AI-added] 2026-09-16: Read-only projections and bounded diagnostic event journal.
 'use strict';
+const {continuationMode}=require('./platforms.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -71,7 +72,7 @@ class Monitor extends EventEmitter {
   contact(identity, action, status, durationMs, result = {}) {
     const key = `${identity.projectId}/${bindingKey(identity)}/${identity.clientId}`;
     const binding = this.store.state.projects[identity.projectId]?.bindings?.[bindingKey(identity)];
-    const provider = binding?.wake ? binding.wake.provider || 'codex' : binding?.provider || binding?.continuation?.provider || 'unknown';
+    const provider = binding?.provider || 'unknown';
     const old = this.contacts.get(key); const now = iso();
     this.contacts.set(key, { lastRequestAt: now, action, status });
     if (!['heartbeat','status','wait'].includes(action) || status >= 400 || !old || Date.parse(now) - (old.loggedAt || 0) >= 60000) {
@@ -95,7 +96,7 @@ class Monitor extends EventEmitter {
       this.changed(p.id, 'project_state', { status: p.completedAt ? 'completed' : p.paused ? 'paused' : p.startup?.state || 'active' }, { projectId: p.id }, initial);
       for (const [key, b] of Object.entries(p.bindings || {})) {
         const id = `${p.id}/${key}/${b.clientId}`; bindings.add(id);
-        this.changed(id, 'connection_state', { status: b.wake ? b.armed ? 'armed' : 'not_parked' : b.continuation?.mode || 'unconfigured', provider: b.wake?.provider || b.provider || b.continuation?.provider || 'unknown' }, { projectId: p.id, binding: key, clientId: b.clientId }, initial);
+        this.changed(id, 'connection_state', { status: b.wake ? b.armed ? 'armed' : 'not_parked' : b.provider && continuationMode(b.provider)==='wait' ? 'wait' : 'unconfigured', provider: b.provider || 'unknown' }, { projectId: p.id, binding: key, clientId: b.clientId }, initial);
       }
       for (const t of Object.values(p.tasks)) {
         this.changed(`${p.id}/${t.id}`, 'task_state', { status: t.state, error: t.error || null }, { projectId: p.id, goalId: t.goalId, taskId: t.id }, initial);
@@ -135,7 +136,7 @@ class Monitor extends EventEmitter {
     } catch (e) {
       if (this.closed || this.store.state.projects[p.id]?.bindings?.[key]?.clientId !== b.clientId) return;
       const value = { checkedAt: iso(), status: 'unreachable', error: clean(e.message), source: 'host-probe' }; this.probes.set(id, value);
-        if (previous?.error !== value.error) this.record('host_observation', { projectId: p.id, binding: key, clientId: b.clientId, provider: b.wake.provider || 'codex', ...value });
+        if (previous?.error !== value.error) this.record('host_observation', { projectId: p.id, binding: key, clientId: b.clientId, provider: b.wake.provider, ...value });
     } finally { this.inFlight.delete(id); }
   }
   tick() {
@@ -154,16 +155,16 @@ class Monitor extends EventEmitter {
         const rebindInvitation=Object.values(p.rebindInvitations||{}).filter(invite=>invite.binding===key).sort((a,c)=>Date.parse(c.createdAt)-Date.parse(a.createdAt))[0];
         const active = Object.values(p.tasks).flatMap(t => (t.attempts || []).filter(a => !a.settled && bindingKey(a) === key).map(a => ({ taskId: t.id, attemptId: a.id, claimed: !!a.claimedBy, state: t.state })));
         if(key==='brain')for(const b of Object.values(p.reviewStages||{}))if(b.attempt&&!b.attempt.settled)active.push({taskId:'阶段 '+b.stageId+' / '+b.id,attemptId:b.attempt.id,claimed:!!b.attempt.claimedBy,state:b.state});
-        return { id, binding: key, clientId: b.clientId, sessionId: b.sessionId || b.wake?.threadId, provider: b.wake ? b.wake.provider || 'codex' : b.provider || b.continuation?.provider || 'unknown',
+        return { id, binding: key, clientId: b.clientId, sessionId: b.sessionId, provider: b.provider || 'unknown',
           role: ['brain','reviewer'].includes(key) ? key : 'worker', workerId: key.startsWith('worker:') ? key.slice(7) : key === 'worker' ? 'default' : undefined,
           continuationError: clean(b.continuationError), wakeEnabled: !!b.wake, armed: !!b.armed, armedAt: b.armedAt || null, contact: contact || null, observation: observation || null,
           communication: contact && Date.now() - Date.parse(contact.lastRequestAt) < 60000 ? 'recent' : 'unknown',
           observationStale: !observation || Date.now() - Date.parse(observation.checkedAt) > 30000,
           handoverPending: !!p.handovers?.[key], rebindInvitation:rebindInvitation?pick(rebindInvitation,['id','status','expiresAt','clientId','recover']):null, active };
       });
-      const tasks = Object.values(p.tasks).map(t => ({ ...pick(t, ['id','goalId','title','state','error','maxAttempts','workerId','requiredCapability','blockKind','contractRevision','stageId','roundId','stageHeld']), dependsOn: t.dependsOn || [],
+      const tasks = Object.values(p.tasks).map(t => ({ ...pick(t, ['id','goalId','title','state','error','maxAttempts','plannedWorkerId','currentWorkerId','plannedRequiredCapability','requiredCapability','blockKind','contractRevision','stageId','roundId','stageHeld']), dependsOn: t.dependsOn || [],
         supersedes:t.supersedes||[],resolution:t.resolution||null,
-        attention: t.attention ? pick(t.attention, ['id','message','kind','createdAt','acknowledged']) : null,
+        attention: t.attention ? pick(t.attention, ['id','message','kind','createdAt','acknowledged','acknowledgedAt','waitReason','resolvedAt','remediationTaskId']) : null,
         budgetExhausted: attempts.exhausted(t), waitingForWorker: t.state === 'ready' && !matches(p, t),
         attempts: (t.attempts || []).map(a => ({ ...pick(a, ['id','role','workerId','provider','model','startedAt','claimedAt','settled','claimedBy']),
           // [AI-added] 2026-09-17 18:43: Expose bounded reminder evidence without credentials or prompt content.
@@ -181,7 +182,8 @@ class Monitor extends EventEmitter {
         if (t.waitingForWorker) alerts.push({ code: 'worker_missing', taskId: t.id, message: '无匹配的执行员连接' });
         if (t.budgetExhausted && !require('./task-state.cjs').terminal(t)) alerts.push({ code: 'budget', taskId: t.id, message: '任务尝试额度已耗尽' });
         if (['blocked','uncertain'].includes(t.state)) alerts.push({ code: t.state, taskId: t.id, message: t.error || '任务需要核实' });
-        if (t.attention && !t.attention.acknowledged) alerts.push({ code: 'task_attention', taskId: t.id, message: t.attention.message || '任务阻塞，等待大脑处理' });
+        if (require('./brain-attention.cjs').actionable(t,p)) alerts.push({ code: 'task_attention', taskId: t.id, message: t.attention.message || '任务阻塞，等待大脑处理' });
+        if (['blocked','uncertain'].includes(t.state) && t.attention?.waitReason) alerts.push({ code: 'waiting_user', taskId: t.id, message: '等待用户决定：' + t.attention.waitReason });
         const a = t.attempts.at(-1);
         // [AI-added] 2026-09-17 18:43: Distinguish a normal claim grace window from an actionable stalled attempt.
         // [AI-fixed] 2026-09-19: Wait-mode attempts never get a wakeNotice; unguarded reads broke capture.
@@ -204,7 +206,8 @@ class Monitor extends EventEmitter {
         if (c.active.length && c.wakeEnabled && !c.armed && !c.active.some(a => a.claimed)) alerts.push({ code: 'not_parked', binding: c.binding, message: '端未 park，待办尚未领取' });
       }
       return { id: p.id, workspace: p.workspace, mode: p.mode, archivedAt: p.archivedAt, paused: !!p.paused, completedAt: p.completedAt, startup: p.startup?.state,
-        ...(p.webSetup ? { title: p.title, team: require('./project-setup.cjs').team(this.wake.desktop, p), ...require('./goals.cjs').summary(p) } : {}),
+        team: (this.wake?.desktop || this.d.desktop) ? require('./project-setup.cjs').team(this.wake?.desktop || this.d.desktop, p) : undefined,
+        ...(p.webSetup ? { title: p.title, ...require('./goals.cjs').summary(p) } : {}),
         usage:require('./usage.cjs').summary(this.store.state,p.id),reviewStages:require('./stage-review.cjs').summary(p),
         planning: p.planning ? { state: p.planning.state, needsAttention: !!p.planning.needsAttention } : null, connections, tasks, alerts };
     });

@@ -42,6 +42,10 @@ function atomic(file, value, options = {}) {
     throw new StorageWriteError(e,file,tmp,phase==='rename'&&['EPERM','EBUSY'].includes(e.code));
   }
 }
+function atomicChanged(file,value) {
+  if(fs.existsSync(file)&&JSON.stringify(read(file))===JSON.stringify(value))return false;
+  atomic(file,value);return true;
+}
 function read(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
 function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; }
@@ -59,8 +63,43 @@ function plainDirectory(dir) {
   if (!fs.statSync(abs).isDirectory()) throw Error('Not a directory: ' + abs);
   return fs.realpathSync(abs);
 }
+function validateState(state) {
+  if (!state || state.version !== 2 || !state.projects || !Array.isArray(state.events) || !Number.isSafeInteger(state.revision)) throw Error('Unsupported/corrupt state: version-2 service data is required; old data is not migrated');
+  const { workerId } = require('./bindings.cjs'), { limit } = require('./attempts.cjs');
+  const { normalizeProvider } = require('./platforms.cjs');
+  for (const p of Object.values(state.projects)) {
+    if (p.mode !== 'desktop' || !p.tasks || typeof p.projectBudgetEnabled !== 'boolean' || !Number.isSafeInteger(p.turns)) throw Error('Unsupported project structure: ' + p.id);
+    if (p.maxTurns !== null) limit(p.maxTurns);
+    if (p.webSetup && (!p.goals || Array.isArray(p.goals) || !Array.isArray(p.goalQueue) || !p.staffing || !Array.isArray(p.staffing.workers) || !p.webSetup.invitations)) throw Error('Unsupported managed project structure: ' + p.id);
+    for (const goal of Object.values(p.goals || {})) if (goal.legacy || goal.legacyFingerprint) throw Error('Unsupported goal structure: ' + goal.id);
+    for (const round of Object.values(p.reviewStages || {})) {
+      if (!Array.isArray(round.members) || !Array.isArray(round.reviewTaskIds) || round.members.some(m => !round.reviewTaskIds.includes(m.taskId))) throw Error('Unsupported stage review structure: ' + round.id);
+    }
+    for (const b of [...Object.values(p.bindings || {}),...Object.values(p.handovers || {}).filter(b=>b.connection).map(b=>({...b,...b.connection}))]) {
+      for (const provider of [b.provider, b.wake?.provider]) normalizeProvider(provider);
+      if (b.wake && (!b.wake.provider || !require('./platforms.cjs').WAKE_PROVIDERS.includes(b.wake.provider))) throw Error('Wake binding requires an explicit supported provider');
+      if (b.wake && (!b.sessionId || b.sessionId !== b.wake.threadId)) throw Error('Wake session differs from connected session');
+      if (b.wake && b.provider !== b.wake.provider) throw Error('Wake provider differs from connected provider');
+      if (b.continuation && !b.provider) throw Error('Unsupported connection structure: explicit provider is required');
+      if (b.wake?.provider === 'qoder' && b.wake.descriptorPath !== undefined && (typeof b.wake.descriptorPath !== 'string' || !path.isAbsolute(b.wake.descriptorPath) || path.basename(b.wake.descriptorPath) !== 'task-dispatch-bridge.json')) throw Error('Invalid Qoder bridge descriptor path');
+      if (b.wake?.provider === 'qoder' && !b.wake.workspace) throw Error('Qoder binding workspace is required');
+    }
+    for (const task of Object.values(p.tasks)) {
+      if (!Object.hasOwn(task, 'plannedRequiredCapability') || !task.plannedWorkerId || !task.currentWorkerId || !Array.isArray(task.attempts)) throw Error('Unsupported task structure: ' + task.id);
+      if (task.reviewOnly || task.repairAuthorized || ['existing-candidate','operator-reconciled'].includes(task.reviewMode)) throw Error('Unsupported imported review task: ' + task.id);
+      if (!Number.isSafeInteger(task.contractRevision) || task.contractRevision < 1) throw Error('Unsupported task contract revision: ' + task.id);
+      limit(task.maxAttempts); workerId(task.plannedWorkerId); workerId(task.currentWorkerId);
+      for (const run of task.attempts) {
+        if (!Number.isSafeInteger(run.contractRevision) || run.contractRevision < 1) throw Error('Unsupported attempt contract revision: ' + run.id);
+        if (run.snapshotPolicy) require('./snapshot.cjs').frozenPolicy(run.snapshotPolicy);
+      }
+    }
+  }
+  return state;
+}
 class Store {
   constructor(root) {
+    require('./data-root.cjs').assertServiceRoot(root);
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
     this.root = plainDirectory(root);
     this.lock = path.join(this.root, 'service.lock');
@@ -73,21 +112,28 @@ class Store {
     }
     try {
       this.state = fs.existsSync(this.file) ? read(this.file) : { version: 2, revision: 0, projects: {}, events: [] };
-      if (this.state.version !== 2 || !this.state.projects || !Array.isArray(this.state.events)) throw Error('Unsupported/corrupt state: 1.0 requires new version-2 service data; legacy queues are not migrated');
-      require('./attempts.cjs').migrate(this.state);
+      validateState(this.state);
       if (!fs.existsSync(this.file)) atomic(this.file, this.state);
     } catch (e) { this.close(); throw e; }
   }
-  change(fn) {
-    const next = structuredClone(this.state);
-    const result = fn(next);
-    require('./attempts.cjs').migrate(next);
-    next.revision++;
-    atomic(this.file, next);
-    this.state = next;
-    // [AI-added] 2026-09-16: Observers run after durable commit and cannot fail business writes.
-    try { this.onCommit?.(next); } catch (e) { this.observationError = e.message; }
-    return result;
+  change(fn) { return this.transaction(() => fn(this.state)); }
+  transaction(fn) {
+    if (this.batching) return fn();
+    const previous = this.state;
+    this.state = structuredClone(previous); this.batching = true;
+    try {
+      const result = fn();
+      if (result && typeof result.then === 'function') throw Error('State transactions must be synchronous');
+      validateState(this.state);
+      if (JSON.stringify(this.state) !== JSON.stringify(previous)) {
+        this.state.revision = previous.revision + 1;
+        atomic(this.file, this.state);
+        this.batching = false;
+        try { this.onCommit?.(this.state); } catch (error) { this.observationError = error.message; }
+      } else this.state = previous;
+      return result;
+    } catch (error) { this.state = previous; throw error; }
+    finally { this.batching = false; }
   }
   event(state, type, data = {}) { state.events.push({ id: id(), at: new Date().toISOString(), type, ...data }); }
   close() {
@@ -100,4 +146,4 @@ class Store {
     fs.unlinkSync(file);
   }
 }
-module.exports = { Store, atomic, StorageWriteError, read, id, sha, readableName, workspaceKey, desktopProjectId, overlaps, plainDirectory, alive };
+module.exports = { Store, validateState, atomic, atomicChanged, StorageWriteError, read, id, sha, readableName, workspaceKey, desktopProjectId, overlaps, plainDirectory, alive };

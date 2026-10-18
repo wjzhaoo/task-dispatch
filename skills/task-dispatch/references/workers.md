@@ -2,11 +2,13 @@
 
 ## 越界退回
 
+命令必须按实际 Shell 选择重定向：Bash 使用 `>/dev/null 2>&1`，PowerShell 使用 `*> $null`，`>nul 2>&1` 仅用于 cmd.exe 或批处理。审核候选内不得写日志、临时脚本或重定向文件。任务交付路径禁止 nul、CON.txt、COM1 等 Windows 保留名；误写时先用 preflight 核对具体路径，确认归属后处理，再提交当前尝试，不能把保留名文件带入候选。
+
 worker 用独立回执提交执行报告，不维护计划文档。越界提交会退回同一个 worker，scopeRecovery 包含原始和被拒快照、越界文件及精确恢复目标。只纠正本人越界增量，保留原实现，不整文件覆盖他人修改；重新通过范围检查后才生成审核候选。该恢复例外不授予计划编辑权限。连续两轮纠正失败或修改来源不明时停下交给 brain。
 
-brain 收到 kind=scope_attention 时核对阻塞和差异，说明需要处理的事项；用 `scope-ack --task <taskId> --alert-id <alertId>`（带原 brain --credential/--data）确认通知。确认不放行任务，不扩大路径。管理员可用 `return-scope <projectId> <taskId>` 让旧版已阻塞的越界尝试进入相同流程；服务在项目空闲时逐项检查，保留每次原始证据。
+brain 收到 kind=scope_attention 时核对阻塞和差异，说明需要处理的事项；用 `scope-ack --task <taskId> --alert-id <alertId>`（带原 brain --credential/--data）确认通知。确认不放行任务，不扩大路径。自动纠正保留每次原始证据；多次失败后由大脑根据通知处置。
 
-除越界退回外，一切 blocked/uncertain 结算（契约冲突、缺失前提、返修超限、运行错误等）都会登记 task_attention 并自动唤醒大脑。大脑收到 kind=task_attention 时先核对 status 中的 attention 与阻塞原因，向用户说明后再处置：`assign --task <id> --retry --reason` 改派重试、管理端 retry、configure-repair、task-budget 追加额度或调整计划；处置后用 `attention-ack --task <taskId> --alert-id <alertId>`（带原 brain --credential/--data）确认。先执行 assign --retry 再 ack 也合法，ack 幂等。原因未核实前不盲目重试。等待型（无唤醒）平台会话停止时服务无法主动通知，管理台以 wait_stalled（任务已派发但执行端静默超过 5 分钟）与 connection_silent（执行端静默超过 10 分钟）提示，需人工回原会话核实或重新接入。
+除越界退回外，一切 blocked/uncertain 结算（契约冲突、缺失前提、返修超限、运行错误等）都会登记 task_attention 并自动唤醒大脑。大脑收到 kind=task_attention 时先核对 status 中的 attention 与阻塞原因，向用户说明后再处置：`assign --task <id> --retry --reason` 改派重试、管理端 retry、task-budget 追加额度或调整计划；必须实际解决阻塞，使任务脱离 blocked/uncertain，或已登记并注册 supersedes 替代任务后，再用 `attention-ack --task <taskId> --alert-id <alertId>`（带原 brain --credential/--data）结算。不得只报告问题、ack 后 park；服务会拒绝未解决且没有等待事项的确认。确需用户决定时增加 `--wait-reason "具体等待事项"`，管理台持续显示等待用户告警。先执行 assign --retry 再 ack 也合法，ack 幂等；历史版本遗留的未解决确认会重新通知大脑。原因未核实前不盲目重试。等待型（无唤醒）平台会话停止时服务无法主动通知，管理台以 wait_stalled（任务已派发但执行端静默超过 5 分钟）与 connection_silent（执行端静默超过 10 分钟）提示，需人工回原会话核实或重新接入。
 
 一个项目有一个 brain 和多个独立 worker。worker 编号如 `strong`、`economy`、`tests`；未指定编号的旧 worker 为 `default`。协议角色仍为 brain/worker，编号不改变角色权限。当前每个项目串行修改和审核，不是多个 worker 同时改原目录。
 
@@ -28,7 +30,7 @@ worker 端按文案运行：
 node "<client>" connect --provider "<当前真实平台>" --role worker --worker-id strong --capability strong --data "<data>"
 ```
 
-cwd 使用文案指定的项目目录。接收端必须显式传真实 provider。Codex 仅在 `--provider codex` 后读取 CODEX_THREAD_ID；MiMo、CodeArts 等 wake 宿主必须显式提供真实 session；Qoder 首次连接可用当前邀请的一次性 ID 核实真实 session。其他 wait-only provider 不要求真实 session ID。凭据自动生成，每个编号独立。
+cwd 使用文案指定的项目目录。接收端必须显式传真实 provider。Codex 仅在 `--provider codex` 后读取 CODEX_THREAD_ID；MiMo 等 wake 宿主必须显式提供真实 session；Qoder 首次连接可用当前邀请的一次性 ID 核实真实 session。其他 wait-only provider 不要求真实 session ID。凭据自动生成，每个编号独立。
 
 任务包可增加 `workerId` 和 `requiredCapability`。例如 D03 要求强模型，则指定 `workerId: "strong"`、`requiredCapability: "strong"`，不能继续默认发给经济模型。未指定 workerId 使用 default。没有匹配绑定时任务保持 ready、不增加执行尝试次数，status 返回 waitingForWorker；告诉用户“任务已登记，等待执行员接入”，不能说已经执行。服务保留具体 worker 编号、尝试和凭据身份，其他 worker 不能领取或提交它的任务。
 
@@ -52,13 +54,13 @@ node "<client>" detach --worker-id economy --credential "<brain凭据>" --data "
 
 大脑说“我要换绑”时，在原会话执行 handoff-invite（带原 --credential/--data），将返回 text 原样交给用户。新会话粘贴后按文案执行 rebind --role brain；不要在旧会话执行 rebind，也不发送旧令牌。
 
-worker 邀请是对应逻辑编号的可复用接替提示词。在新会话粘贴后 connect 自动请求换绑；同一会话重复连接幂等。每个会话使用独立凭据文件，旧文件不覆盖，旧 token 在交接完成时撤销。显式 rebind 仍兼容。
+worker 邀请对应一个逻辑编号。换会话时生成该编号的新邀请，不把同一个一次性握手标识复制到多个会话；新会话 connect 自动请求换绑；同一会话重复连接幂等。每个会话使用独立凭据文件，旧文件不覆盖，旧 token 在交接完成时撤销。显式 rebind 可用于指定接替会话。
 
-有在途尝试时返回 handoverPending，服务持久化交接请求并停止该 worker 的新任务。旧端先提交真实结果或 blocked；原 worker 的 scopeRecovery 必须先解决。新端不得执行或接管未结算的写入。服务在安全边界自动切换，新端再次 connect 获取状态和原队列；旧端失联时不猜测它已停止，明确报告交接等待。凭据轮换不等于终止操作系统进程。
+有在途尝试时返回 handoverPending，服务持久化交接请求并停止该 worker 的新任务。旧端先提交真实结果或 blocked；原 worker 的 scopeRecovery 必须先解决。新端不得执行或接管未结算的写入。服务在安全边界自动切换，新端执行 resume 等待交接完成并自动领取任务或待命；旧端失联时不猜测它已停止，明确报告交接等待。凭据轮换不等于终止操作系统进程。
 
-新端必须重新绑定自己的唤醒，不继承旧 threadId；历史回执、审核和任务保留。冲突的第二个接替请求被拒绝，不能静默替换第一位等候者。
+接入时已核验并保存新端的唤醒配置，交接完成后使用该配置，不继承旧 threadId；历史回执、审核和任务保留。冲突的第二个接替请求被拒绝，不能静默替换第一位等候者。
 
-返回 handoverPending 后执行输出 nextAction 中的 handover-wait 命令。等待由本地脚本轮询，不调用模型；默认最多一小时，超时仍是等待，不是接替成功。若工具返回进程ID，继续等待原进程，不重启第二个等待者。返回 attached:true 后绑定新会话唤醒并 claim；无需用户再次手工断绑或粘贴。旧端失联需要用户恢复旧会话或明确处置，不能伪造结算。
+返回 handoverPending 后按 nextInstruction 执行 resume --credential <新端凭据>。服务根据持久提交事件等待交接，本地脚本只在有界请求到期后续等，不读取完整项目状态或调用模型；默认最多一小时，超时仍是等待，不是接替成功。若工具返回进程ID，继续等待原进程，不重启第二个等待者。交接完成的回执直接包含 job 或 parked:true；无需再次 connect/rebind、核验或查询 status。旧端失联需要用户恢复旧会话或明确处置，不能伪造结算。
 
 reviewer 崩溃且无法自解绑时，brain 可在核实异常退出后执行 `detach --role reviewer --credential <brain凭据> --data <服务目录>`。这是明确的终止和恢复操作：服务结算旧 reviewer client 拥有的在途初审、将任务恢复为待初审，等待新的 reviewer，并撤销旧 token。不要仅因等待时间长或一次宿主读取失败执行此命令。worker 的 `detach --worker-id` 与安全交接语义不变。
 
@@ -80,8 +82,10 @@ Web 目标项目直接复用页面已保存的团队：默认大脑、初审端�
 
 assign --task <任务ID> --worker-id <编号> --capability <能力> --reason "调整原因"（带 brain --credential/--data）将 ready 任务交给另一个编号；blocked 实施任务可加 --retry。不能改派在途尝试或原 worker 的 scopeRecovery，不修改已通过历史和允许路径。换绑改变同一编号的会话，assign 改变任务接收编号。
 
-assign 默认只更新当前执行者 currentWorkerId（workerId 为兼容别名）与当前 requiredCapability，保留 plannedWorkerId/plannedRequiredCapability。本任务后续返修继续使用当前执行者；新任务不会继承它。跨任务延续强模型时，大脑对对应未开始任务使用 assign --update-plan --reason "原因"，同时明确计划与当前分配。所有改派记录原因；旧客户端需补 --reason。
+assign 默认只更新当前执行者 currentWorkerId与当前 requiredCapability，保留 plannedWorkerId/plannedRequiredCapability。本任务后续返修继续使用当前执行者；新任务不会继承它。跨任务延续强模型时，大脑对对应未开始任务使用 assign --update-plan --reason "原因"，同时明确计划与当前分配。所有改派记录原因。
 
 任务包可指定 maxAttempts，默认 30，执行和审核 attempt 共用该任务额度。status 的 attemptCounts 分别给出 execution/review/total，maxAttempts 是任务上限，budgetExhausted 表示无法新增 attempt，已派发 attempt 仍可领取和提交。项目 projectAttempts 是历史累计次数；projectBudgetEnabled 控制可选项目保护。
 
 大脑需要追加额度时调用 task-budget --task <任务ID> --add 10 --reason "补充验证"（带原 brain --credential/--data）。追加数为正整数，服务保留计数并记录原因；升级和换绑不会自动追加。blocked 仍需按原重试规则处理，追加额度不会绕过恢复、越界纠正或交接边界。
+
+等待型 worker 不要求真实 session ID，以邀请自带的 --invitation-id 区分连接。新会话使用新邀请，重试复用同一个 ID；改绑不复用旧端凭据。已有本端凭据的普通 connect/resume 继续复用已记录的平台及邀请标识。邀请标识不能替代 wake 平台的真实会话 ID。

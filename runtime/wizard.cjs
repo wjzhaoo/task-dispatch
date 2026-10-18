@@ -2,7 +2,7 @@
 // [AI-added] 2026-09-14 09:43
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn, spawnSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 const { createInterface } = require('node:readline/promises');
 const { read, Store } = require('./core/storage.cjs');
 const cli = path.join(__dirname, 'cli.cjs');
@@ -37,36 +37,55 @@ function bootstrapRoot(args = [], context = {}) {
   if (!selected) throw Error('尚无已登记项目；请先在项目会话中执行 connect');
   return selected.dataRoot;
 }
-function initialize(root) {
-  if (fs.existsSync(path.join(root, 'config.json'))) return;
-  const p = spawnSync(process.execPath, [cli, 'init', '--data', root], { encoding: 'utf8', windowsHide: true });
-  if (p.status !== 0) throw Error(p.stderr || '初始化失败');
-}
-async function request(root, body) {
+function initialize(root) { return require('./core/config.cjs').initialize(root); }
+function serviceClient(root) {
   const endpoint = read(path.join(root, 'endpoint.json'));
   const token = fs.readFileSync(path.join(root, 'admin-token'), 'utf8').trim();
-  const r = await fetch(`http://127.0.0.1:${endpoint.port}/${body ? 'command' : 'status'}`, {
-    method: body ? 'POST' : 'GET', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-    ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(body ? 60000 : 5000)
-  });
-  const result = await r.json(); if (!r.ok) throw Error(result.error); return result;
+  return { async request(body, route = body ? 'command' : 'status') {
+    const response = await fetch(`http://127.0.0.1:${endpoint.port}/${route}`, {
+      method:body ? 'POST' : 'GET', headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+      ...(body ? {body:JSON.stringify(body)} : {}), signal:AbortSignal.timeout(body ? 60000 : route.startsWith('ready') ? 1000 : 5000)
+    });
+    const result=await response.json(); if(!response.ok)throw Object.assign(Error(result.error),{status:response.status}); return result;
+  }};
 }
+async function request(root, body) { return serviceClient(root).request(body); }
 async function online(root) { try { return await request(root); } catch { return null; } }
-async function start(root, { port } = {}) {
-  if (await online(root)) return;
-  // A dead service lock can be removed; a live or ambiguous owner is never bypassed.
-  if (fs.existsSync(path.join(root, 'service.lock'))) Store.unlock(root);
-  const log = fs.openSync(path.join(root, 'service.log'), 'a');
-  let child;
-  try { child = spawn(process.execPath, [cli, 'start', '--data', root, ...(port === undefined ? [] : ['--port', String(port)])], { detached: true, windowsHide: true, stdio: ['ignore', log, log] }); }
-  finally { fs.closeSync(log); }
-  let failure; child.on('error', e => { failure = e; }); child.unref();
-  for (let i = 0; i < 40; i++) {
-    if (failure) throw failure;
-    if (await online(root)) return;
-    await new Promise(r => setTimeout(r, 200));
-  }
-  throw Error('启动失败，请查看 ' + path.join(root, 'service.log'));
+async function start(root, { port, connection } = {}) {
+  initialize(root);
+  const query = connection ? '?' + new URLSearchParams(connection) : '';
+  let lastError;
+  const probe = async () => {
+    try {
+      const client=serviceClient(root), status=await client.request(undefined,'ready'+query);
+      if(status.connectionProtocol!==require('./core/connection.cjs').PROTOCOL)throw Object.assign(Error('服务 connect 接口版本不匹配；请在授权范围内重启对应项目服务。'),{protocolMismatch:true});
+      return status.ready ? {...status,request:client.request} : null;
+    } catch(error) {
+      if(error.status===404)throw Error('运行中的服务尚不支持 connect 接口（GET /ready 返回 404）；请在授权范围内重启对应项目服务。');
+      if(error.status===401||error.status===403||error.protocolMismatch)throw error;
+      lastError=error;return null;
+    }
+  };
+  const running=await probe();if(running)return running;
+  return require('./core/file-lock.cjs').withFileLock(path.join(root,'startup.lock'),async()=>{
+    const running=await probe();if(running)return running;
+    const serviceLock=path.join(root,'service.lock');let live=false,failure;
+    if(fs.existsSync(serviceLock)){const lock=read(serviceLock);live=!Number.isInteger(lock.pid)||require('./core/storage.cjs').alive(lock.pid);if(!live)Store.unlock(root);}
+    if(!live){
+      const log=fs.openSync(path.join(root,'service.log'),'a');let child;
+      try{child=spawn(process.execPath,[cli,'start','--data',root,...(port===undefined?[]:['--port',String(port)])],{detached:true,windowsHide:true,stdio:['ignore',log,log]});}
+      finally{fs.closeSync(log);}
+      child.on('error',error=>{failure=error;});
+      child.on('exit',(code,signal)=>{failure=Error('服务启动进程退出（'+(signal||code)+'），请查看 '+path.join(root,'service.log'));});child.unref();
+    }
+    const deadline=Date.now()+30000;
+    while(Date.now()<deadline){
+      if(failure)throw failure;
+      const ready=await probe();if(ready)return ready;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    throw Error('服务未在 30 秒内就绪：'+(lastError?require('./core/continuation.cjs').detail(lastError):'未知原因')+'；请查看 '+path.join(root,'service.log'));
+  });
 }
 // [AI-added] 2026-09-21 09:38: Keep CLI labels aligned with the Web console terminal states.
 const labels = { ready: '待执行', running: '执行中', review_ready: '待审核', reviewing: '审核中', accepted: '已通过', resolved: '已由后续任务解决', blocked: '阻塞', uncertain: '需核实旧进程' };
@@ -155,7 +174,7 @@ async function main() {
         for(const service of services){let projects;try{projects=service.current?status.projects:registry.stateAt(service.root)?.projects||{};}catch{continue;}
           for(const p of Object.values(projects))if(!seen.has(p.id)){seen.add(p.id);listed.push({p,service});}}
         for (const {p,service} of listed) {
-          const source=service.current?'当前服务':service.root===require('./core/data-root.cjs').legacyDataRoot()?'公共缓存':'项目/自定义缓存';
+          const source=service.current?'当前服务':'项目/自定义缓存';
           console.log(`\n项目：${p.id} ${p.completedAt ? '（已结束）' : p.paused ? '（暂停）' : ''}${service.current?'':'（只读汇总）'}\n路径：${p.workspace}\n来源：${source} | ${service.root} | ${service.online?'运行中':'未运行'}\n项目累计次数：${p.turns} / ${p.projectBudgetEnabled?p.maxTurns:"未启用项目保护"}`);
           for (const t of Object.values(p.tasks)) console.log(`  ${t.id} 任务尝试次数 ${require('./core/attempts.cjs').counts(t).total}/${t.maxAttempts}（执行 ${require('./core/attempts.cjs').counts(t).execution}，审核 ${require('./core/attempts.cjs').counts(t).review}）${labels[t.state] || t.state}${t.blockKind==='environment'?'（验证环境）':''}：${t.title}${t.error ? '\n    ' + t.error : ''}`);
           for (const t of Object.values(p.tasks)) { const n=t.attempts.at(-1)?.wakeNotice; if(n)console.log(`    ${t.id} 唤醒通知：${n.status || '待连接'}${n.error ? ' / '+n.error : ''}`); }
@@ -204,5 +223,5 @@ async function main() {
     } catch (e) { console.log('未完成：' + e.message); }
   } } finally { rl.close(); }
 }
-if (require.main === module) main().catch(e => { console.error(e.message); process.exitCode = 1; });
-module.exports = { dataRoot, catalogEntries, bootstrapRoot, initialize, request, online, start };
+if (require.main === module) main().catch(e => { console.error(require('./core/continuation.cjs').detail(e)); process.exitCode = 1; });
+module.exports = { serviceClient, dataRoot, catalogEntries, bootstrapRoot, initialize, request, online, start };

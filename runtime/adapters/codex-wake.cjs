@@ -1,14 +1,11 @@
 'use strict';
 const fs = require('node:fs');
 const { rpc } = require('../../scripts/probe-codex-desktop.cjs');
-// [AI-added] 2026-09-18: Discovery used to spawn powershell.exe to list the pipe namespace.
-// That created a console host on every dispatch tick, which flashes a window on a console-less
-// (detached) service. The namespace is directly readable, so no process is started at all.
-// Names are matched case-insensitively to keep the previous -match semantics.
+// Enumerate the pipe namespace directly without starting a shell process.
 const PIPE_ROOT = '\\\\.\\pipe\\';
 const PIPE_MARKER = 'codex-browser-use-';
 class CodexWake {
-  constructor() { this.pipe = null; this.discovery = null; }
+  constructor({ rpcImpl = rpc } = {}) { this.rpc = rpcImpl; this.pipe = null; this.discovery = null; }
   async resolveTurn(threadId, workspace, sessionRoot) {
     const fs=require('node:fs'), path=require('node:path');
     // [AI-added] 2026-09-24 14:23: Use the active suffixed rollout, not an older exact-name log.
@@ -39,7 +36,7 @@ class CodexWake {
       if (!name.toLowerCase().includes(PIPE_MARKER)) continue;
       const pipe = PIPE_ROOT + name;
       try {
-        const r = await rpc(pipe,{id:1,jsonrpc:'2.0',method:'tools/list',params:{threadStartKind:'all'}});
+        const r = await this.rpc(pipe,{id:1,jsonrpc:'2.0',method:'tools/list',params:{threadStartKind:'all'}});
         if (['read_thread','send_message_to_thread'].every(n=>r.result?.tools?.some(t=>t.namespace==='codex_app'&&t.name===n))) return this.pipe=pipe;
       } catch {}
     }
@@ -47,7 +44,7 @@ class CodexWake {
   }
   async call(binding, tool, args) {
     try {
-      const r = await rpc(await this.discover(), {id:2,jsonrpc:'2.0',method:'tools/call',params:{namespace:'codex_app',tool,threadId:binding.threadId,turnId:binding.turnId,callId:require('node:crypto').randomUUID(),arguments:args}},10000);
+      const r = await this.rpc(await this.discover(), {id:2,jsonrpc:'2.0',method:'tools/call',params:{callerSource:'codex',namespace:'codex_app',tool,threadId:binding.threadId,turnId:binding.turnId,callId:require('node:crypto').randomUUID(),arguments:args}},10000);
       if (r.error || r.result?.success !== true) throw Error('Desktop call failed: '+(r.error?.message || 'unsuccessful result'));
       const text=r.result.contentItems?.find(i=>i.type==='inputText')?.text;
       return JSON.parse(text);

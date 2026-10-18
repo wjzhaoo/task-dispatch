@@ -46,11 +46,40 @@ test('reviewer disconnect blocks the stage instead of falling back to individual
  const x=await setup(t);x.task('A');x.register(x.definition(['A']));const w=await x.claim('worker');x.d.reviewerPresence.clear();fs.writeFileSync(path.join(x.workspace,'A.txt'),'A');await x.submit(w);assert.equal((await x.claim('brain')).kind,'stage_attention');assert.equal(x.p().tasks.A.attempts.length,1);
  require('../runtime/core/pre-review.cjs').touch(x.d,x.identities.reviewer);stage.resume(x.desktop,x.identities.brain,{roundId:'R1'});await x.submit(await x.claim('reviewer'));assert.equal((await x.claim('brain')).kind,'stage_review');
 });
+
+test('restart waits for persisted reviewer verification and then continues without stage-resume',async t=>{
+ const x=await setup(t);x.task('A');x.d.pause('p',true);x.register(x.definition(['A']));
+ x.store.change(s=>{const p=s.projects.p;p.paused=false;p.bindings.reviewer.provider='codex';p.bindings.reviewer.sessionId='reviewer-thread';p.bindings.reviewer.wake={provider:'codex',threadId:'reviewer-thread',turnId:'turn'};});
+ const d=new Dispatcher(x.store,{maxConcurrent:2}),desktop=new Desktop(d);
+ const {Wake}=require('../runtime/core/wake.cjs');
+ const wake=new Wake(desktop,{read:async()=>({thread:{id:'reviewer-thread',cwd:x.workspace,status:{type:'idle'}},turns:[]})});
+ assert.equal(require('../runtime/core/pre-review.cjs').online(d,x.p()),false);
+ assert.equal(stage.gate(d,x.p()).stop,true);
+ assert.equal(x.p().reviewStages.R1.state,'collecting');
+ assert.equal(x.p().reviewStages.R1.error,undefined);
+ await wake.run();
+ assert.equal(require('../runtime/core/pre-review.cjs').online(d,x.p()),true);
+ assert.equal(stage.gate(d,x.p()).stop,false);
+ assert.equal(x.store.state.events.some(e=>e.type==='stage_attention'),false);
+});
+
+test('a failed restart reviewer verification still blocks the stage with evidence',async t=>{
+ const x=await setup(t);x.task('A');x.d.pause('p',true);x.register(x.definition(['A']));
+ x.store.change(s=>{const p=s.projects.p;p.paused=false;p.bindings.reviewer.provider='codex';p.bindings.reviewer.sessionId='reviewer-thread';p.bindings.reviewer.wake={provider:'codex',threadId:'reviewer-thread',turnId:'turn'};});
+ const d=new Dispatcher(x.store,{maxConcurrent:2}),desktop=new Desktop(d),{Wake}=require('../runtime/core/wake.cjs');
+ const wake=new Wake(desktop,{read:async()=>{throw Error('host unavailable');}});
+ assert.equal(stage.gate(d,x.p()).stop,true);
+ assert.equal(x.p().reviewStages.R1.state,'collecting');
+ await wake.run();
+ assert.equal(stage.gate(d,x.p()).stop,true);
+ assert.equal(x.p().reviewStages.R1.state,'blocked');
+ assert.match(x.p().reviewStages.R1.error,/Reviewer offline/);
+});
 test('durable whole-stage receipt survives storage contention and restart exactly once',async t=>{
  const x=await setup(t);x.task('A');x.register(x.definition(['A']));await x.execute('A');const j=await x.claim('brain'),original=fs.renameSync;let failing=true;
  t.mock.method(fs,'renameSync',(from,to)=>{if(failing&&to===x.store.file)throw Object.assign(Error('busy'),{code:'EPERM'});return original(from,to);});
  assert.equal(x.final(j).settlementPending,true);assert.equal(x.desktop.claim(x.identities.brain),null);failing=false;x.store.close();
- const nextStore=new Store(x.store.root);t.after(()=>nextStore.close());const next=new Dispatcher(nextStore,{enableRealCalls:false},()=>assert.fail('No calls'));next.recover();next.recover();assert.equal(nextStore.state.projects.p.tasks.A.state,'accepted');assert.equal(nextStore.state.events.filter(e=>e.type==='stage_review_settled').length,1);
+ const nextStore=new Store(x.store.root);t.after(()=>nextStore.close());const next=new Dispatcher(nextStore,{maxConcurrent:2});next.recover();next.recover();assert.equal(nextStore.state.projects.p.tasks.A.state,'accepted');assert.equal(nextStore.state.events.filter(e=>e.type==='stage_review_settled').length,1);
 });
 test('failed-stage provenance stays protected from cleanup until all repairs pass',async t=>{
  const x=await setup(t);x.task('A');x.register(x.definition(['A']));await x.execute('A');const j=await x.claim('brain');x.final(j,x.verdict(j,false));const before=x.p().tasks.A.attempts[0].baselineId;

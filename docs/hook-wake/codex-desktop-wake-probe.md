@@ -1,5 +1,11 @@
 # Codex Desktop 原会话唤醒验证
 
+## 2026-10-18 首次接入修复
+
+本机 `OpenAI.Codex_26.1007.9446.0_x64` 的 tools/call 请求结构新增必填 `callerSource`（`codex` 或 `chatgpt`）。旧适配器缺少该字段，宿主在参数校验阶段返回 `Invalid app tool request`，补充 turnId 不能解决。适配器现为 Codex 调用明确传入 `callerSource: "codex"`。
+
+修复后已通过真实 Desktop 管道成功读取本会话，并核实返回的 thread ID 与工作目录；本次验证未发送真实唤醒消息。回归测试覆盖 read_thread 和 send_message_to_thread 的请求字段。此入口仍是私有接口，不能将本次验证视为长期协议兼容保证。
+
 日期：2026-09-12。Windows 安装包：OpenAI.Codex_26.903.9818.0_x64。
 
 ## 结论

@@ -4,9 +4,9 @@
 
 ## 升级与数据目录
 
-服务状态格式为 version 2，明确拒绝旧版队列。升级使用新的服务数据目录和重新接入的角色，不迁移旧工作流、不删除原数据。修改源码不会改变已经运行的服务；实际安装、停止和启动服务按用户授权执行。
+服务状态格式为 version 2，明确拒绝旧版队列。结构完整的现行数据继续使用；缺少契约版本、阶段累计成员或绑定身份的数据明确拒绝，不补齐字段、不迁移旧工作流、不删除原数据。修改源码不会改变已经运行的服务；实际安装、停止和启动服务按用户授权执行。
 
-新项目默认使用工作区内受保护的 `.task-dispatch/runtime/<项目路径摘要>/`。自定义 `--data` 目录必须位于业务工作区之外。状态、凭据、快照、收据和审核副本均保存在服务目录；系统缓存中的项目目录表只记录路径映射。`runtime/migrate-data.cjs` 仅用于同版本服务的目录搬迁，不能转换旧队列。
+新项目默认使用工作区内受保护的 `.task-dispatch/runtime/<项目路径摘要>/`。自定义 `--data` 目录必须位于业务工作区之外。状态、凭据、快照、收据和审核副本均保存在服务目录；系统缓存中的项目目录表只记录路径映射。只读取用户总目录中的 v2 项目注册表，不扫描旧目录或连接文件，不提供目录迁移工具；用户总目录及其元数据子目录不能承载服务数据。
 
 项目内 `docs/plans/`、`docs/reviews/` 和 `.task-dispatch/plan.md` 属于大脑控制面。worker 的业务修改受 allowedPaths 约束；需要提交执行证据时，只能写明确授权的 `docs/worker-results/<任务ID>/`。根目录 `tmp/` 用于临时输出，不能作为交付路径。
 
@@ -14,7 +14,7 @@
 
 `start.bat` 是桌面客户端入口；`dashboard.bat` 打开统一 Web 控制台。Skill 安装器生成 `runtime-link.json` 指向本仓库客户端，不复制或启动服务。仓库移动后需重新安装更新链接。
 
-各角色通过 `runtime/desktop-client.cjs connect --provider <真实平台>` 接入。brain/reviewer 使用 Codex、MiMo、Qoder 或 OpenCode；worker 可使用其他支持的平台。角色必须明确自身平台，遵守真实会话身份要求，不复用其他角色凭据。接入细节见[连接发现](../skills/task-dispatch/references/connection.md)、[桌面会话](../skills/task-dispatch/references/desktop.md)和[多执行员](../skills/task-dispatch/references/workers.md)。
+各角色通过 `runtime/desktop-client.cjs connect --provider <真实平台>` 接入。brain/reviewer 使用 Codex、MiMo、Qoder、OpenCode、CodeArts 或 DSH，均通过 wake 续接；只有 worker 可使用非 wake 平台并持续 wait。角色必须明确自身平台，遵守真实会话身份要求，不复用其他角色凭据。接入细节见[连接发现](../skills/task-dispatch/references/connection.md)、[桌面会话](../skills/task-dispatch/references/desktop.md)和[多执行员](../skills/task-dispatch/references/workers.md)。
 
 连接阶段由大脑登记 staffing、展示邀请并核对角色就绪，不派发任务。计划中的 worker 和必需的 reviewer 就绪，且用户已给出开始指令后，大脑调用：
 
@@ -36,11 +36,11 @@ node runtime/desktop-client.cjs start-work --confirmed --credential BRAIN.json -
 
 ## 异常、契约与恢复
 
-blocked、uncertain、越界、额度不足或审核端离线会通知大脑。优先处理 task_attention 或 scope_attention 的具体问题，再恢复阶段。attention-ack 和 scope-ack 只确认通知，不让任务通过。
+blocked、uncertain、越界、额度不足或审核端离线会通知大脑。优先处理 task_attention 或 scope_attention 的具体问题，再恢复阶段。task_attention 必须先实际解决阻塞或注册 supersedes 替代任务，再执行 attention-ack；确需用户决定时显式传 --wait-reason，管理台保留等待事项，不能只确认通知后挂起。历史版本中已确认但未解决的阻塞会重新唤醒大脑。scope-ack 只确认越界通知，不让任务通过。服务重启后先核验持久化的初审唤醒绑定，再决定是否因初审离线而阻塞阶段，避免首次核验前误判离线。
 
 - 原契约内的普通阻塞可 retry、改派执行员或追加尝试额度；uncertain 必须核实旧执行及后台进程已停止后恢复，服务不自动回滚业务文件。
 - 小脑初审的 needs_fix 在原任务内返修；自动返修保护耗尽后交给大脑。手动重试不清零累计尝试次数。
-- 大脑只可在项目暂停、阶段空闲时 revise-task 修订尚未执行的 ready 成员；旧契约和修订原因保留。已执行契约不可改写，configure-repair、reconcile-review 或替代任务不能绕过阶段冻结。
+- 大脑只可在项目暂停、阶段空闲时 revise-task 修订尚未执行的 ready 成员；旧契约和修订原因保留。已执行契约不可改写，替代任务不能绕过阶段冻结。
 - 已执行任务确需变更契约时，由大脑明确处理方案；若必须重建计划，核实执行已停止后，通过管理台整体重置阶段并重新登记计划。重置包含原任务、修复任务及受影响的下游阶段，保留审计并使旧回执失效。正常终审补修不使用重置。
 - reviewer 临时无心跳不会撤销已领取审核。确认原端终止后显式 detach 或安全交接，恢复在线 reviewer，再用 stage-resume 继续。
 - 准备终审时中断，先确认验证子进程停止，再 `stage-resume --round ROUND --confirmed-stopped`。已领取的终审保留所有权，通过原端或正式交接继续。
@@ -59,6 +59,8 @@ pause 只停止后续派发，不会终止外部会话。停止服务也不等�
 
 更多说明：[Web 控制台](admin-console.md)、[快照与存储清理](storage-usage.md)、[独立验证环境](review-validation.md)。协议角色隔离不能代替操作系统文件权限；worker 修改工作区后才进行范围校验，审核在候选副本中只读进行。
 
+Shell 重定向按实际执行器选择：Bash 使用 `>/dev/null 2>&1`，PowerShell 使用 `*> $null`，`>nul 2>&1` 仅用于 cmd.exe 或批处理。任务路径禁止 Windows 保留名（如 nul、CON.txt、COM1）；工作区预检保留具体路径诊断，新快照、审核副本和验证副本拒绝包含此类文件。历史快照仍可读取取证，不改写已有证据。服务不能拦截其他宿主直接执行的任意 Shell 命令；发现误写时先核实来源、处理文件，再使用当前尝试重新预检和提交。
+
 ## 开发验证
 
 ```powershell
@@ -67,3 +69,11 @@ npm run verify:skill
 ```
 
 测试使用本地夹具，不调用真实模型。安装验证指定临时用户目录，不安装到真实宿主。Windows 同时运行大量测试出现磁盘争用时，可用 `node --test --test-concurrency=4 tests/*.test.cjs` 执行相同的完整测试集。
+
+## 连接编排与初始化
+
+服务配置仅需 `version: 1` 与 `maxConcurrent`，不再生成或读取无人值守模型的启动档案。`connect` 通过轻量 `/ready` 核对服务和本角色绑定，再发一次连接请求；注册、续接和待命合并为一次持久化事务。原样重连和重复待命不改写状态及本端凭据。并发冷启动共用启动锁，同一会话并发接入共用连接锁。真实会话 ID、工作目录及平台仍须核验；核验、模型校验或写盘失败不发布部分绑定。
+
+已有明确平台时直接复用，缺失时才询问。首次连接使用 connect，后续 resume；旧手动接入与单任务复审命令已移除。状态仍使用 version 2，完整现行数据继续使用，旧导入审核数据和缺少 provider 的 wake 绑定明确拒绝。运行中的服务不支持当前连接接口时，客户端立即报告具体接口错误，不自动重启现有服务；代码需在用户授权范围内重启对应项目服务后加载。
+
+安全换绑在首次 connect/rebind 时核验并保存新会话配置，待原端结算后原子切换绑定和邀请状态。新端统一 resume，使用认证的有界事件等待，交接完成后直接返回 job 或待命结果；不再使用 handover-wait、全量管理状态轮询或二次 connect。取消、替换、断线和重复等待均有明确反馈。单次 resume 的配置与领取/待命合并提交，空变更不写盘。重复安装也不重写相同收据。

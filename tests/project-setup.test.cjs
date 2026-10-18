@@ -1,4 +1,5 @@
 'use strict';
+const {registerDesktop}=require('./service-fixture.cjs');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
@@ -28,12 +29,12 @@ async function fixture(t, { cold = false, workspaceName = '中文 project' } = {
     fs.rmSync(temp, { recursive: true, force: true });
   });
   if (!cold) {
-    atomic(path.join(root, 'config.json'), { version: 1, enableRealCalls: false, maxConcurrent: 1, profiles: { codex: { adapter: 'codex', command: process.execPath, args: [] } } });
+    atomic(path.join(root, 'config.json'), { version: 1, maxConcurrent: 1 });
     const adapter = { resolveTurn: async () => 'real-test-turn',
       read: async binding => ({ thread: { id: binding.threadId, cwd: workspace, status: { type: 'idle' } }, turns: [] }),
       verify: async binding => { verifies++; return adapter.read(binding); },
       send: async (_binding, message) => { sends.push(message); return {}; } };
-    target = await require('../runtime/server.cjs').serve(root, { wakeAdapter: { forProvider: () => adapter } });
+    target = await require('./service-fixture.cjs').serve(root, { wakeAdapter: { forProvider: () => adapter } });
   }
   catalog = await require('../runtime/catalog-console.cjs').serve({ registryOptions: { file: path.join(temp, 'registry.json'), home: path.join(temp, 'home') } });
   const url = `http://127.0.0.1:${catalog.port}`;
@@ -169,13 +170,14 @@ test('a saved Web goal starts once with explicit authorization and survives serv
     return x.api(prefix + 'commands', { commandId: crypto.randomUUID(), instanceId: overview.instanceId, revision: overview.revision, projectId: created.projectId, goalId: created.goalId, action: 'start-goal', confirmed: true, ...extra });
   }
   assert.equal((await start({ confirmed: false })).status, 400);
+  const premature = await (await start()).json(); assert.equal(premature.ok, false); assert.match(premature.error, /所有成员就绪/);
   assert.equal(x.target.store.state.projects[created.projectId].startup.state, 'waiting');
   // CLI connection is covered above. Exercise startup through the real HTTP protocol here.
   const credentials = await Promise.all(setup.team(desktop, x.target.store.state.projects[created.projectId]).members.map(async member => {
-    const credential = await request(x.root, { action: 'attach-desktop', workspace: x.workspace, role: member.role, workerId: member.workerId,
+    const credential = await registerDesktop(x.root,{ workspace: x.workspace, role: member.role, workerId: member.workerId,
       capabilities: member.capability ? [member.capability] : [], clientId: crypto.randomUUID(), token: crypto.randomBytes(32).toString('hex'), sessionId: member.binding,
       joinInvitationId: setup.joinId(x.target.store.state.projects[created.projectId], member.binding) });
-    await call(x.root, credential, { action: 'configure-continuation', provider: 'codex' });
+    await call(x.root, credential, { action: 'resume', provider: 'codex' });
     await call(x.root, credential, { action: 'park' });
     return credential;
   }));
@@ -193,8 +195,10 @@ test('a saved Web goal starts once with explicit authorization and survives serv
   assert.equal(setup.team(desktop, x.target.store.state.projects[p.id]).canStart, false);
   const queued = await (await x.api('projects', { ...x.input, commandId: crypto.randomUUID(), title: '重启后继续', startMode: 'auto' })).json();
   const draft = await (await x.api('projects', { ...x.input, commandId: crypto.randomUUID(), title: '重启后仍只保存' })).json();
+  assert.equal(x.target.store.state.projects[p.id].goals[queued.goalId].state, 'draft');
+  assert.equal((await (await start({goalId: queued.goalId})).json()).ok, true);
   await x.target.close();
-  const restarted = await require('../runtime/server.cjs').serve(x.root, { wakeAdapter: { forProvider: () => ({ read: async () => ({ thread: { status: { type: 'active' } } }) }) } });
+  const restarted = await require('./service-fixture.cjs').serve(x.root, { wakeAdapter: { forProvider: () => ({ read: async () => ({ thread: { status: { type: 'active' } } }) }) } });
   try {
     const restored = restarted.store.state.projects[p.id];
     assert.equal(restored.startup.state, 'started'); assert.equal(restored.planning.id, planningId);
@@ -207,8 +211,19 @@ test('a saved Web goal starts once with explicit authorization and survives serv
 test('default three-member team starts an authorized goal once; appending and repeated starts never reconfigure or wake twice', async t => {
   const x = await fixture(t); delete x.input.workers;
   const created = await x.create(), p = () => x.target.store.state.projects[created.projectId], prefix = `p/${created.key}/`;
-  assert.equal(setup.team(x.target.admin.desktop, p()).total, 3); assert.equal(p().goals[created.goalId].state, 'queued');
+  assert.equal(setup.team(x.target.admin.desktop, p()).total, 3); assert.equal(p().goals[created.goalId].state, 'draft');
   await connectAll(x, created); x.target.dispatcher.tick();
+  assert.equal(p().activeGoalId, null); assert.equal(p().planning, undefined);
+  await x.target.monitor.wake.run(); assert.equal(x.sends.length, 0);
+  async function command(action, extra = {}) {
+    const snapshot = await (await x.api(prefix + 'overview')).json();
+    return (await x.api(prefix + 'commands', { commandId: crypto.randomUUID(), instanceId: snapshot.instanceId, revision: snapshot.revision, projectId: p().id, action, confirmed: true, ...extra })).json();
+  }
+  assert.equal((await command('pause', {confirmed: false})).error, '必须确认此操作影响');
+  assert.equal((await command('pause')).ok, true);
+  assert.equal((await command('start-goal', {goalId: created.goalId})).ok, false);
+  assert.equal((await command('resume')).ok, true); assert.equal(p().planning, undefined);
+  assert.equal((await command('start-goal', {goalId: created.goalId})).ok, true);
   assert.equal(p().activeGoalId, created.goalId); assert.equal(p().planning.goalId, created.goalId);
   await x.target.monitor.wake.run();
   const planningId = p().planning.id, binds = structuredClone(p().bindings);
@@ -219,9 +234,11 @@ test('default three-member team starts an authorized goal once; appending and re
   }
   assert.equal((await x.create()).goalId, created.goalId);
   const second = await (await x.api('projects', { ...x.input, commandId: crypto.randomUUID(), title: '稍后执行' })).json();
+  assert.equal(p().goals[second.goalId].state, 'draft');
+  assert.equal((await command('start-goal', {goalId: second.goalId})).ok, true);
   assert.deepEqual(p().goalQueue, [second.goalId]); assert.equal(p().planning.id, planningId); assert.deepEqual(p().bindings, binds);
   await x.target.monitor.wake.run(); assert.equal(x.sends.length, 1); assert.equal(x.verifies(), 3);
   const snapshot = await (await x.api(prefix + 'overview')).json();
-  const cancelled = await (await x.api(prefix + 'commands', { commandId: crypto.randomUUID(), instanceId: snapshot.instanceId, revision: snapshot.revision, projectId: p().id, goalId: second.goalId, action: 'cancel-goal' })).json();
+  const cancelled = await (await x.api(prefix + 'commands', { commandId: crypto.randomUUID(), instanceId: snapshot.instanceId, revision: snapshot.revision, projectId: p().id, goalId: second.goalId, action: 'cancel-goal', confirmed: true })).json();
   assert.equal(cancelled.ok, true); assert.equal(p().goals[second.goalId].state, 'cancelled'); assert.deepEqual(p().goalQueue, []);
 });

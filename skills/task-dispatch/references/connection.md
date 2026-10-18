@@ -4,9 +4,9 @@
 
 用户可在 Web 主页创建目标和成员配置，随后分别发送各角色首次接入邀请。按邀请内客户端绝对路径、真实平台、角色、项目与 `--join-invitation` 执行一次 `connect`；首次邀请不能覆盖另一个已绑定客户端，换人使用改绑邀请。用户已明确指定当前平台时复用其选择，不重复询问；未指定时仍由接收端确认，不猜测平台或会话。
 
-返回 `peerSetupManagedBy: web` 表示 Web 已保存 staffing 并提供全部成员邀请。大脑读取 `brief` 与 `staffing`，不重新配置团队、不派生或再次输出其他成员邀请。所有成员可同时接入，`parked:true` 后直接结束本回合等待唤醒。按回执补充缺项，禁止通过反复 status 或重复连接等待其他成员。
+返回 `peerSetupManagedBy: web` 表示 Web 已保存 staffing 并提供全部成员邀请。大脑读取 `brief` 与 `staffing`，不重新配置团队、不派生或再次输出其他成员邀请。所有成员可同时接入。仅 wake 平台明确返回 `parked:true` 后可结束本回合等待唤醒；wait 平台必须执行回执的 `nextCommand` 持续等待，不能以接入成功或口头等待结束回合。按回执补充缺项，禁止通过反复 status 或重复连接等待其他成员。
 
-Web 默认“大脑＋初审端＋一名执行员”，创建表单将编号、能力与职责收进高级设置。用户点击「创建并开始」即明确授权，目标入队，全部成员就绪且轮到时自动开始；「仅保存」只建待开始目标，之后点击开始或由大脑按用户指令执行 `start-goal --goal <goalId> --confirmed` 才入队。新增目标复用项目及绑定，只邀请缺少成员，不改变当前目标的阶段、验收和团队。团队只能在没有活动目标时调整。
+Web 默认“大脑＋初审端＋一名执行员”，创建表单将编号、能力与职责收进高级设置。创建目标后只保存，不提前授权；所有成员就绪后，用户在 Web 点击「开始」并确认，或由大脑按用户明确指令执行 `start-goal --goal <goalId> --confirmed`，才执行或入队。未就绪的开始请求会被拒绝，后续接入也不会补启动。新增目标复用项目及绑定，只邀请缺少成员，不改变当前目标的阶段、验收和团队。团队只能在没有活动目标时调整。
 
 领取 `kind: planning` 后按 goalId 与 brief 处理当前目标。plan/stage-register 自动关联当前目标，任务和阶段编号使用目标前缀以免重名；禁止跨目标混入审核。完成目标并通过完整阶段终审、任务和结算检查后，实际执行 `finish-goal --goal <goalId> --summary <验收摘要>`，再 `resume`。服务顺序执行下个已授权目标；空队列保留成员待命，不能自行 finish-project。阻塞时保留当前目标和队列，报告具体原因；未开始目标可在 Web 取消。服务重启保留开始授权、队列与规划，不重复创建目标或唤醒。
 
@@ -33,15 +33,15 @@ node "<client>" connect --provider "<当前真实平台>"
 ```
 
 <!-- [AI-added] 2026-09-17 11:46 -->
-命令默认使用 cwd、brain 和项目内 `.task-dispatch/runtime/<项目路径摘要>/` 独立服务目录；凭据也保存在该受保护且被忽略的运行目录。用户指定自定义或旧服务时追加 `--data "<data>"`。每个角色首次 connect/rebind 前必须先询问用户当前会话平台，由用户明确选择；不得根据模型、目录、环境变量或邀请来源猜测。`connect/rebind` 必须显式传 `--provider <真实平台>`，缺失和 `auto` 均会在任何服务或凭据副作用前被拒绝，并提示可选平台。brain/reviewer 支持 Codex、MiMo、Qoder、OpenCode；worker 可使用合法平台名。Codex 仅在显式 `--provider codex` 后读取 CODEX_THREAD_ID；MiMo、CodeArts、OpenCode 等 wake 平台必须由宿主提供真实 `--session-id`；Qoder 首次连接可传当前邀请的一次性 `--invitation-id`，由提示 Hook 与桥接共同核实真实 session 和 workspace。管理台生成的 `--managed-rebind --invitation-id` 对所有平台仅表示换绑授权，仍不能替代真实 session 身份。管理台改绑弹窗按平台分别给出提示词：MiMo、CodeArts、OpenCode 那份命令已带 `--session-id <当前真实会话 ID>` 占位，Codex 与 Qoder 那份不需要人工填会话 ID；接收端只复制与自己平台对应的那条，不要改用其他平台的命令或删改参数。改绑到 Qoder 时先把那条提示词原样发给目标 Qoder 会话（其中带 `[TASK-DISPATCH-INVITE:<uuid>]` 握手标识，Hook 据此记录会话身份），再执行提示词里的 `rebind` 命令；跳过粘贴会让握手文件缺失，改绑在任何服务副作用前被拒绝。其他 worker provider 直接进入 wait，不要求 session ID。OpenCode 使用真实 `ses_...` ID，安装与宿主条件见 [OpenCode 接入](opencode.md)。
+命令默认使用 cwd、brain 和项目内 `.task-dispatch/runtime/<项目路径摘要>/` 独立服务目录；凭据也保存在该受保护且被忽略的运行目录。用户指定自定义服务目录时追加 `--data "<data>"`。每个角色 connect/rebind 复用用户已明确指定的平台或本端凭据记录的平台，不重复询问；仅缺少平台信息时才询问用户；不得根据模型、目录、环境变量或邀请来源猜测。`connect/rebind` 必须显式传 `--provider <真实平台>`，没有已确认平台可复用时，缺失和 `auto` 均会在任何服务或凭据副作用前被拒绝，并提示可选平台。brain/reviewer 支持 Codex、MiMo、Qoder、OpenCode、CodeArts、DSH 六种 wake 平台；只有 worker 可使用非 wake 的合法平台名。Codex 仅在显式 `--provider codex` 后读取 CODEX_THREAD_ID；MiMo、OpenCode、CodeArts、DSH 等 wake 平台必须由宿主提供真实 `--session-id`；Qoder 首次连接可传当前邀请的一次性 `--invitation-id`，由提示 Hook 与桥接共同核实真实 session 和 workspace。管理台生成的 `--managed-rebind --invitation-id` 对所有平台仅表示换绑授权，仍不能替代真实 session 身份。管理台改绑弹窗按平台分别给出提示词：MiMo、OpenCode、CodeArts、DSH 那份命令已带 `--session-id <当前真实会话 ID>` 占位，Codex 与 Qoder 那份不需要人工填会话 ID；接收端只复制与自己平台对应的那条，不要改用其他平台的命令或删改参数。改绑到 Qoder 时先把那条提示词原样发给目标 Qoder 会话（其中带 `[TASK-DISPATCH-INVITE:<uuid>]` 握手标识，Hook 据此记录会话身份），再执行提示词里的 `rebind` 命令；跳过粘贴会让握手文件缺失，改绑在任何服务副作用前被拒绝。其他 worker provider 直接进入 wait，不要求 session ID。OpenCode 使用真实 `ses_...` ID，安装与宿主条件见 [OpenCode 接入](opencode.md)。
 
 用户明确要求手动接入时，不自动派生任何会话：大脑只接入并生成邀请，等用户确认各端就绪且明确发令后才 plan。brain connect 在 reviewer 或计划内 worker 尚未连接时返回 `nextAction=setup-peers`：必须向用户展示 `reviewerInvite.text`；若 `workerInviteStatus=pending-staffing`，先执行 staff，再逐条展示回执中的 `workerInvites[].text`。即使回执同时包含 `parked:true`，也不能把角色配置误报为已完成或只回复等待。用户要求测试唤醒即由 connect/resume 核实适配器并配置，不能仅因 connect 返回 wakeEnabled:false 就默认 wait。先核对宿主真实会话目录与服务 workspace 一致，不能仅切换终端目录。status.connections 返回各绑定的会话 ID、wakeEnabled、provider、armed；armed 只证明曾 park，不保证通知已被处理。
 
-brain 正常换绑使用 `rebind --role brain`，旧端有在途审核时保持 `handoverPending`，等待旧端安全提交。只有旧 brain 已永久不可用，并且用户明确确认旧会话及其后台任务均已停止时，才允许追加 `--recover --confirmed-stopped`。确认式恢复会撤销旧 brain 凭据、替换遗留 pending handover，并把未结算 brain attempt 的所有权转给新 brain；新端随后用返回凭据执行 claim 继续同一 attempt。模型不得自行添加确认参数。worker/reviewer 不支持该恢复参数，仍走原安全交接。
+brain 正常换绑使用 `rebind --role brain`，旧端有在途审核时保持 `handoverPending`，等待旧端安全提交。只有旧 brain 已永久不可用，并且用户明确确认旧会话及其后台任务均已停止时，才允许追加 `--recover --confirmed-stopped`。确认式恢复会撤销旧 brain 凭据、替换遗留 pending handover，并把未结算 brain attempt 的所有权转给新 brain；新端直接处理返回的 job，未返回 job 时按 nextAction 执行 resume。模型不得自行添加确认参数。worker/reviewer 仅能通过管理台已确认旧端停止的恢复邀请执行该参数；其他情况走安全交接。
 
 brain connect 还返回 reviewerOnline、reviewerSpawnRequired 和 reviewerInvite。连接阶段若 reviewerSpawnRequired 为 true，使用宿主已授权的派生能力创建一个独立经济模型小脑审核员，将 reviewerInvite.text 原样交给它；先核实真实子会话身份和模型，不能复用大脑或执行员凭据。已有在线 reviewer 时复用，不重复派生。宿主不支持派生或无法取得真实会话 ID 时展示邀请并说明未接入；接入阶段报告缺项，小脑接入完成前不能启动。离线旧 reviewer 换绑使用 rebind --role reviewer；先核对旧端状态，不借用旧凭据。
 
-所有候选审核请求（包括既有实现导入及返修）先交在线 reviewer，全阶段 pass 后才交 brain 集中终审；needs_fix 直接返回 worker，blocked 保留阻塞。小脑无权终审接受、派单或修改候选。初审按 artifactId 绑定，候选更新必须重新初审。规划、收尾、越界处置属于大脑管理操作，仍由大脑处理。
+所有正式任务的候选审核请求及返修先交在线 reviewer，全阶段 pass 后才交 brain 集中终审；needs_fix 直接返回 worker，blocked 保留阻塞。小脑无权终审接受、派单或修改候选。初审按 artifactId 绑定，候选更新必须重新初审。规划、收尾、越界处置属于大脑管理操作，仍由大脑处理。
 
 reviewer 使用 connect --role reviewer 接入；heartbeat 或 progress 仅用于可选进度展示，不是所有权租约。已 claim 的初审不因耗时、无心跳或暂态适配器读取失败被撤销，attemptId/clientId 校验继续阻止重复提交。审核端确定停止时由自身显式 detach；若 reviewer 已崩溃，brain 核实后明确执行 `detach --role reviewer --credential <brain凭据> --data <服务目录>`。服务只在这个显式信号下结算该端在途初审并等待新的 reviewer 恢复初审，随后旧 reviewer token 失效。服务重启后不从旧活动时间猜测在线。每次初审也计入任务尝试额度与用量。
 
@@ -54,7 +54,7 @@ brain connect 返回 staffingRequired、已有 staffing 和 workerInvites。首�
 ## 定位服务
 
 <!-- [AI-added] 2026-09-17 11:46 -->
-优先使用本会话已确认的客户端、数据目录和角色凭据。否则读取安装后 Skill 根目录的 `runtime-link.json`：`client` 是开发仓库客户端绝对路径；新版 `dataMode=workspace-local-v2` 表示由客户端根据已确认工作区解析项目内私有运行目录，旧版 `data` 固定路径继续兼容。该文件不含令牌；仓库移动后重新安装即可更新。原生插件或源码直接加载没有此文件时，检查本 Skill 所属仓库的 `runtime/desktop-client.cjs`，不扫描用户磁盘或猜测其他仓库。
+优先使用本会话已确认的客户端、数据目录和角色凭据。否则读取安装后 Skill 根目录的 `runtime-link.json`：`client` 是开发仓库客户端绝对路径；`version=3`、`dataMode=workspace-local-v2` 表示由客户端根据已确认工作区解析项目内私有运行目录。该文件不含令牌；仓库移动后重新安装即可更新。原生插件或源码直接加载没有此文件时，检查本 Skill 所属仓库的 `runtime/desktop-client.cjs`，不扫描用户磁盘或猜测其他仓库。
 
 用户提供了自定义数据目录时优先使用该目录；已有凭据必须沿用其中记录的数据目录。不能由“项目默认目录未找到连接”推断旧全局或其他自定义服务不存在。脚本不存在、工作区不明确或自定义目录未知时说明具体缺项；不要静默扫描磁盘或猜测其他服务。
 
@@ -76,16 +76,16 @@ node "<client>" status --credential "<credential>" --data "<data>"
 
 核对项目目录、角色、已有任务、暂停及完成状态。认证失败或凭据缺失时停止复用并说明原因；服务离线时按已授权的恢复流程处理，不自动另建身份。状态仅代表查询时刻；实际可领取任务以 claim 为准。
 
-无连接且用户要求开始协作时调用上方 connect。旧版本使用自定义凭据路径的会话传原 `--credential` 复用；自动入口检查已有会话或唤醒身份，冲突时不抢占。底层 attach 与唤醒细节见 [桌面会话接入](desktop.md)。
+无连接且用户要求开始协作时调用上方 connect。使用自定义凭据路径时传 `--credential`；自动入口检查已有会话或唤醒身份，冲突时不抢占。接入、续接和错误处置见 [桌面会话接入](desktop.md)。
 
 ## 工作闭环
 
-1. brain 先查询状态，避免重复派发已有任务。将已授权工作按任务模板拆分，用 `plan` 提交；worker 不能派单。
+1. brain 使用 connect/resume 返回的状态和 job，避免重复派发已有任务；仅缺少必要上下文时查询 status。将已授权工作按任务模板拆分，用 `plan` 提交；worker 不能派单。
 2. 用 `claim` 领取正式任务，按返回的身份、工作目录和提示执行，使用 `submit` 提交实际结果。
-3. 实际执行 `resume`，由脚本选择 `park` 或有界 `wait`；按回执处理任务、缺项和结束，不自行猜测平台续接方式。
+3. 实际执行 `resume --seconds 60`，由脚本选择 `park` 或有界 `wait`。wait 平台超时回执仍带 `nextAction: resume` 和可直接执行的 `nextCommand`，立即继续执行；`idle:true`、等待用户开始、空队列和项目暂停均不是结束理由。工具返回进程会话 ID 时续等同一个进程，不并行启动新等待；工具超时至少 90 秒。收到 job 后处理、submit，再 resume；只有 `completed:true`、用户明确停止或真实权限/连接错误才退出等待并说明原因。
 4. 暂停、阻塞或预算耗尽时报告原因；项目完成时结束。不要为查询进度启动模型轮询。
 
-服务状态优先于聊天中的任务清单；`submitted` 不是审核通过。恢复时先查询和领取，不能重复实现原尝试。
+服务状态优先于聊天中的任务清单；`submitted` 不是审核通过。恢复时直接 resume 领取原尝试，按返回 job 继续，不能重复实现。
 
 ## 自动待命与调度告警
 

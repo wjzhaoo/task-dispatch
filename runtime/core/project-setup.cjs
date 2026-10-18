@@ -1,4 +1,5 @@
 'use strict';
+const {continuationMode}=require('./platforms.cjs');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { plainDirectory, desktopProjectId, sha } = require('./storage.cjs');
@@ -26,7 +27,7 @@ function validate(input) {
     throw error;
   }
   const title = text(input.title, '目标名称', 120), objective = text(input.objective, '目标与验收要求', 12000);
-  const startMode = input.startMode ?? 'auto';
+  const startMode = input.startMode ?? 'manual';
   if (!['auto', 'manual'].includes(startMode)) throw Error('开始方式只支持 auto 或 manual');
   return { commandId: input.commandId, workspace, title, objective, ...(input.workers !== undefined ? { workers: workers(input.workers) } : {}), startMode };
 }
@@ -41,28 +42,20 @@ function fields(input) {
   goals.add(value, setup, fingerprint(setup));
   return value;
 }
-function legacyStaffing(p) {
-  const existing = Object.entries(p.bindings || {}).filter(([key]) => key === 'worker' || key.startsWith('worker:')).map(([key, b]) => ({
-    workerId: key === 'worker' ? 'default' : key.slice(7), capability: b.capabilities?.[0] || 'general', responsibilities: '沿用已接入执行员' }));
-  return staffing({ rationale: '复用已有项目成员', workers: existing.length ? existing : defaultWorkers() });
-}
 function create(dispatcher, input) {
   const setup = validate(input), hash = fingerprint(setup);
   const prior = Object.values(dispatcher.store.state.projects).find(p => p.workspace === setup.workspace || Object.values(p.goals || {}).some(goal => goal.commandId === setup.commandId));
   if (prior) {
     const duplicate = Object.values(prior.goals || {}).find(goal => goal.commandId === setup.commandId);
     if (duplicate) {
-      const { startMode, ...oldShape } = setup;
-      if (duplicate.fingerprint !== hash && !(duplicate.legacyFingerprint && duplicate.fingerprint === fingerprint(oldShape))) throw Error('同一创建编号不能用于不同内容');
+      if (duplicate.fingerprint !== hash) throw Error('同一创建编号不能用于不同内容');
       return { ok: true, projectId: prior.id, goalId: duplicate.id, duplicate: true, teamReused: true };
     }
     if (prior.mode !== 'desktop' || prior.archivedAt) throw Error('请先恢复桌面协作项目，再新增目标');
+    if (!prior.webSetup || !prior.goals || !prior.staffing) throw Error('Unsupported managed project structure; create a current project in a new service data directory');
     let goal;
     dispatcher.store.change(s => {
-      const p = s.projects[prior.id]; goals.adopt(p);
-      p.webSetup ||= { commandId: setup.commandId, createdAt: new Date().toISOString(), invitations: {} };
-      p.staffing ||= legacyStaffing(p);
-      p.title ||= path.basename(p.workspace);
+      const p = s.projects[prior.id];
       goal = goals.add(p, setup, hash);
       if (p.completedAt) { delete p.completedAt; p.startup = { state: 'waiting' }; }
       dispatcher.store.event(s, 'goal_created', { projectId: p.id, goalId: goal.id, status: goal.state });
@@ -79,13 +72,12 @@ function create(dispatcher, input) {
 function members(p) {
   return [{ binding: 'brain', role: 'brain', responsibilities: '规划、派发与阶段终审' },
     { binding: 'reviewer', role: 'reviewer', responsibilities: '独立初审' },
-    ...(p.staffing?.workers || []).map(w => ({ ...w, role: 'worker', binding: bindingKey({ role: 'worker', workerId: w.workerId }) }))];
+    ...(p.staffing?.workers || Object.keys(p.bindings || {}).filter(key => key === 'worker' || key.startsWith('worker:')).map(key => ({ workerId: key === 'worker' ? 'default' : key.slice(7), responsibilities: '完成已分配任务' }))).map(w => ({ ...w, role: 'worker', binding: bindingKey({ role: 'worker', workerId: w.workerId }) }))];
 }
 function joinId(p, key) {
   if (!p?.webSetup || !members(p).some(member => member.binding === key)) return null;
   if (p.webSetup.invitations[key]) return p.webSetup.invitations[key];
-  const hash = sha(p.webSetup.commandId + ':' + key);
-  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+  return null;
 }
 function team(desktop, p) {
   if (!p || p.mode !== 'desktop') throw Error('项目不存在或不是桌面协作项目');
@@ -96,16 +88,16 @@ function team(desktop, p) {
     else if (p.handovers?.[member.binding]) { state = 'configuring'; message = '等待安全交接'; }
     else if (b.continuationError) { state = 'configuring'; message = '续接配置未完成，请回原会话检查回执'; }
     else if (!supports(b, member.capability)) { state = 'configuring'; message = '执行能力与配置不符'; }
-    else if ((!b.wake && b.continuation?.mode !== 'wait') || (member.role !== 'worker' && !b.wake)) { state = 'configuring'; message = '已绑定，等待配置续接'; }
+    else if ((!b.wake && (!b.provider || continuationMode(b.provider) !== 'wait')) || (member.role !== 'worker' && !b.wake)) { state = 'configuring'; message = '已绑定，等待配置续接'; }
     else if ((p.startup?.state !== 'started' || (p.goals && !p.activeGoalId)) && b.wake && !b.armed) { state = 'configuring'; message = '已绑定，请在原会话继续待命'; }
     else if (member.role === 'reviewer' && !require('./pre-review.cjs').online(desktop.d, p)) { state = 'configuring'; message = '请在原初审会话恢复续接'; }
-    return { ...member, state, message, connected: !!b, provider: b?.wake?.provider || b?.continuation?.provider || null };
+    return { ...member, state, message, connected: !!b, provider: b?.provider || null };
   });
   const ready = rows.filter(row => row.state === 'ready').length;
-  let canConfigure = !p.archivedAt && !p.completedAt;
+  let canConfigure = !!p.webSetup && !p.archivedAt && !p.completedAt;
   try { goals.assertTeamIdle(desktop.d, p); } catch { canConfigure = false; }
   return { projectId: p.id, title: p.title, managed: !!p.webSetup, startup: p.startup?.state || 'waiting', members: rows, ready, total: rows.length,
-    canConfigure, canStart: !!p.webSetup && !p.paused && !p.completedAt && !p.archivedAt && !p.activeGoalId && ready === rows.length };
+    canConfigure, canStart: (p.goals ? Object.values(p.goals).some(g => g.state === 'draft') : p.startup?.state !== 'started') && !p.paused && !p.completedAt && !p.archivedAt && !p.activeGoalId && rows.some(member => member.role === 'worker') && ready === rows.length };
 }
 function configureTeam(desktop, projectId, input) {
   const p = desktop.store.state.projects[projectId];
@@ -116,9 +108,10 @@ function configureTeam(desktop, projectId, input) {
     const b = p.bindings?.[bindingKey({ role: 'worker', workerId: w.workerId })];
     if (b && !supports(b, w.capability)) throw Error('已有执行员能力不匹配，请先使用显式改绑更新该成员');
   }
+  if(JSON.stringify(p.staffing.workers)===JSON.stringify(selected))return {ok:true,duplicate:true,workspace:p.workspace,staffing:p.staffing};
   const value = staffing({ rationale: '用户在 Web 管理端调整团队', workers: selected });
   desktop.store.change(s => { s.projects[projectId].staffing = value; desktop.store.event(s, 'staffing_assessed', { projectId }); });
-  return { ok: true, staffing: value };
+  return { ok: true, workspace:p.workspace, staffing: value };
 }
 function invitation(desktop, p, root, key) {
   const member = team(desktop, p).members.find(row => row.binding === key);

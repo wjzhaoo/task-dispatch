@@ -5,7 +5,7 @@ const fs = require('node:fs'), path = require('node:path');
 const { promisify } = require('node:util');
 const execFile = promisify(require('node:child_process').execFile);
 const { initialize, request } = require('../runtime/wizard.cjs');
-const { serve } = require('../runtime/server.cjs');
+const { serve } = require('./service-fixture.cjs');
 const { call } = require('../runtime/desktop-client.cjs');
 const cli = path.resolve(__dirname, '../runtime/desktop-client.cjs');
 
@@ -13,7 +13,7 @@ test('connect requires an explicit non-auto provider before any service or crede
   const base=path.resolve(__dirname,'../tmp');fs.mkdirSync(base,{recursive:true});
   const temp=fs.mkdtempSync(path.join(base,'provider-required-')),root=path.join(temp,'service'),workspace=path.join(temp,'project');fs.mkdirSync(workspace);
   for(const extra of [[],['--provider','auto'],['--provider','mimo'],['--provider','opencode']]){
-    await assert.rejects(execFile(process.execPath,[cli,'connect','--data',root,'--workspace',workspace,...extra],{cwd:workspace,windowsHide:true}),['mimo','opencode'].includes(extra[1])?/real --session-id/:/Ask the user to choose the current platform/);
+    await assert.rejects(execFile(process.execPath,[cli,'connect','--data',root,'--workspace',workspace,...extra],{cwd:workspace,windowsHide:true}),['mimo','opencode'].includes(extra[1])?/real --session-id/:/Reuse the platform already explicitly selected/);
     assert.equal(fs.existsSync(root),false);
   }
 });
@@ -39,7 +39,7 @@ test('connect without --data creates and reuses the protected workspace-local se
   const root=require('../runtime/core/data-root.cjs').projectDataRoot(workspace);
   const waitStopped=async()=>{for(let i=0;i<100;i++){if(!fs.existsSync(path.join(root,'service.lock')))return;await new Promise(resolve=>setTimeout(resolve,50));}throw Error('service did not stop');};
   try {
-    const args=[cli,'connect','--provider','codex','--workspace',workspace,'--session-id','project-data-session'];
+    const args=[cli,'connect','--provider','zcode','--role','worker','--workspace',workspace];
     const first=JSON.parse((await execFile(process.execPath,args,{cwd:workspace,windowsHide:true})).stdout);
     assert.equal(first.data,root);assert.equal(path.relative(workspace,root).split(path.sep).slice(0,2).join('/'),'.task-dispatch/runtime');
     assert.match(fs.readFileSync(path.join(workspace,'.task-dispatch','.gitignore'),'utf8'),/^runtime\/$/m);
@@ -52,11 +52,13 @@ test('connect without --data creates and reuses the protected workspace-local se
   }
 });
 
-test('connect defaults to cwd and brain, starts service, preserves session ownership and explicitly reopens', async () => {
+test('connect defaults to cwd and brain, preserves session ownership and explicitly reopens', async () => {
   const base=path.resolve(__dirname,'../tmp');fs.mkdirSync(base,{recursive:true});
   const temp=fs.mkdtempSync(path.join(base,'connect-auto-')),root=path.join(temp,'service'),workspace=path.join(temp,'project');
-  fs.mkdirSync(workspace);
-  const run=async(cwd,...args)=>JSON.parse((await execFile(process.execPath,[cli,'connect','--provider','codex','--data',root,'--session-id',args.includes('worker')?'worker-session':'session-A',...args],{cwd,windowsHide:true})).stdout);
+  fs.mkdirSync(workspace); initialize(root);
+  const directories=new Map();
+  const service=await serve(root,{wakeAdapter:{resolveTurn:async(id,cwd)=>{directories.set(id,cwd);return 'fixture-turn';},read:async b=>({thread:{id:b.threadId,cwd:directories.get(b.threadId),status:{type:'active'}}})}});
+  const run=async(cwd,...args)=>JSON.parse((await execFile(process.execPath,[cli,'connect','--provider','codex','--data',root,'--session-id',path.basename(cwd)+(args.includes('worker')?'-worker':'-brain'),...args],{cwd,windowsHide:true})).stdout);
   try {
     const first=await run(workspace);assert.equal(first.role,'brain');assert.equal(first.workspace,fs.realpathSync(workspace));
     assert.match(first.projectId,/^desktop-project-[a-f0-9]{8}$/);
@@ -71,7 +73,7 @@ test('connect defaults to cwd and brain, starts service, preserves session owner
     await require('./stage-fixture.cjs').startHttp(root,brain);
     await call(root,brain,{action:'plan',task:{id:'T',title:'check',instructions:'check',acceptance:'checked',allowedPaths:['README.md']}});
   await require('./stage-fixture.cjs').beginHttp(root,brain,['T']);
-    const j=(await call(root,wc,{action:'wait'})).job;
+    const j=(await call(root,wc,{action:'claim'})).job;
     await call(root,wc,{action:'submit',taskId:j.taskId,attemptId:j.attemptId,result:{projectId:j.projectId,taskId:j.taskId,attemptId:j.attemptId,role:'worker',status:'submitted',summary:'checked',checks:[],unverified:[]}});
     await require('./stage-fixture.cjs').approveHttp(root,brain);
     await request(root,{action:'finish-project',projectId:first.projectId});
@@ -80,7 +82,7 @@ test('connect defaults to cwd and brain, starts service, preserves session owner
     const other=path.join(temp,'other');fs.mkdirSync(other);const second=await run(other);
     assert.notEqual(second.projectId,first.projectId);assert.notEqual(second.credential,first.credential);
     await assert.rejects(run(other,'--credential',first.credential),/different role\/workspace\/service/);
-  } finally { await request(root,{action:'stop'}); }
+  } finally { await service.close(); }
 });
 
 test('installed skill locates runtime; discovery and status reuse bindings without exposing secrets or claiming work', async () => {
@@ -97,12 +99,12 @@ test('installed skill locates runtime; discovery and status reuse bindings witho
   const run = async (...args) => JSON.parse((await execFile(process.execPath, [cli, ...args, '--data', root], { windowsHide: true })).stdout);
   assert.deepEqual((await run('discover', '--workspace', workspace)).connections, []);
   assert.equal(fs.existsSync(path.join(root, 'connections')), false);
-  const service = await serve(root);
+  const service = await serve(root,{wakeAdapter:{resolveTurn:async()=> 'fixture-turn',read:async b=>({thread:{id:b.threadId,cwd:workspace,status:{type:'active'}}})}});
   try {
     for (const role of ['brain', 'worker']) {
       const credential = path.join(root, role + '.json');
-      await run('attach', '--role', role, '--workspace', workspace, '--credential', credential);
-      await run('attach', '--role', role, '--workspace', workspace, '--credential', credential);
+      await run('connect','--provider',role==='worker'?'zcode':'codex','--session-id',role+'-session', '--role', role, '--workspace', workspace, '--credential', credential);
+      await run('connect','--provider',role==='worker'?'zcode':'codex','--session-id',role+'-session', '--role', role, '--workspace', workspace, '--credential', credential);
     }
     const found = await run('discover', '--workspace', workspace);
     assert.equal(found.connections.length, 2); assert.equal(found.selectionRequired, true);

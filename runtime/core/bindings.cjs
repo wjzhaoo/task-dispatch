@@ -23,7 +23,7 @@ function staffing(value) {
   return { rationale: value.rationale.trim(), workers, concurrencyRequested: value.concurrencyRequested === true, executionMode: 'serial-shared-workspace' };
 }
 function matches(project, task) {
-  const key=bindingKey({role:'worker',workerId:task.currentWorkerId||task.workerId});
+  const key=bindingKey({role:'worker',workerId:task.currentWorkerId});
   const binding = project.bindings?.[key];
   return !!binding && (!project.handovers?.[key] || !!task.scopeRecovery) && (!task.scopeRecovery?.clientId || binding.clientId===task.scopeRecovery.clientId) && supports(binding, task.requiredCapability);
 }

@@ -1,19 +1,37 @@
 'use strict';
+const {bindWake}=require('./service-fixture.cjs');
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const {configure} = require('../runtime/core/continuation.cjs');
 
+test('all wait invitation variants require actual continued waiting, while wake variants keep park', () => {
+  const path = require('node:path'), crypto = require('node:crypto');
+  const invites = require('../runtime/core/invitations.cjs');
+  const base = {role:'worker',workerId:'default',workspace:process.cwd(),dataRoot:path.resolve('tmp/service'),clientPath:path.resolve('runtime/desktop-client.cjs'),referencePath:path.resolve('skills/task-dispatch/references/connection.md'),invitationId:crypto.randomUUID()};
+  const join = invites.buildJoinInvitation(base);
+  const rebind = invites.buildRebindInvitation({...base,preferredProvider:'zcode'});
+  const genericRebind = invites.buildRebindInvitation(base);
+  for (const text of [invites.buildInvitation(base).text, join.platforms.find(p=>p.provider==='wait').text, join.text, rebind.text, genericRebind.platforms.find(p=>p.provider==='wait').text, genericRebind.text]) {
+    assert.match(text,/不需要用户再次说 resume/);
+    assert.match(text,/每次有界等待到期都继续 resume/);
+    assert.match(text,/等待开始、空队列和项目暂停/);
+    assert.match(text,/续等同一进程/);
+  }
+  assert.match(join.platforms.find(p=>p.provider==='codex').text,/明确返回 parked:true/);
+  assert.doesNotMatch(join.platforms.find(p=>p.provider==='codex').text,/本端是 wait 平台/);
+});
+
 function fixture(readers = {},role='reviewer') {
   const binding={sessionId:'session'}, identity={projectId:'p',role};
   const project={workspace:process.cwd(),bindings:{[role==='worker'?'worker':role]:binding}};
-  const store={state:{projects:{p:project}},change:fn=>fn(store.state)};
+  const store={state:{projects:{p:project}},change:fn=>fn(store.state),transaction:fn=>fn()};
   const desktop={store,assertBinding:()=>binding,nextStep:()=>({nextAction:project.completedAt?'stop':binding.wake?'park':'wait'})};
   const calls=[];
-  const wake={desktop,forProvider:provider=>({read:async input=>{
+  const wake=new (require('../runtime/core/wake.cjs').Wake)(desktop,{forProvider:provider=>({read:async input=>{
     calls.push(provider);
     if(!readers[provider])throw Error('unavailable');
     return readers[provider](input);
-  }}),bind:async (_,input)=>{binding.wake=input;}};
+  }})});
   return {wake,identity,binding,project,calls};
 }
 const info=()=>({thread:{id:'session',cwd:process.cwd()}});
@@ -23,15 +41,15 @@ test('unknown or unreachable host never silently falls back to wait',async()=>{
   assert.equal(f.binding.wake,undefined);
 });
 test('explicit provider selects one supported host and binds before park',async()=>{
-  const f=fixture({codearts:info},'worker');const result=await configure(f.wake,f.identity,{provider:'codearts'});
-  assert.equal(result.provider,'codearts');assert.equal(result.nextAction,'park');
+  const f=fixture({qoder:info},'worker');const result=await configure(f.wake,f.identity,{provider:'qoder'});
+  assert.equal(result.provider,'qoder');assert.equal(result.nextAction,'park');
   assert.equal(f.binding.wake.threadId,'session');
 });
 // [AI-added] 2026-09-24 13:27: Connect reuses the verified host result, while direct binding still verifies.
-test('connect verifies host once and direct wake-bind verifies independently',async()=>{
+test('continuation verifies host once and internal wake binding verifies independently',async()=>{
   const {Wake}=require('../runtime/core/wake.cjs');
   const binding={sessionId:'session'},project={id:'p',workspace:process.cwd(),bindings:{reviewer:binding}};
-  const store={state:{projects:{p:project}},change:fn=>fn(store.state)};
+  const store={state:{projects:{p:project}},change:fn=>fn(store.state),transaction:fn=>fn()};
   const desktop={store,assertBinding:()=>binding,nextStep:()=>({nextAction:binding.wake?'park':'wait'})};
   let verified=0,fullReads=0;
   const adapter={verify:async()=>{verified++;return info();},read:async()=>{fullReads++;return info();}};
@@ -39,13 +57,13 @@ test('connect verifies host once and direct wake-bind verifies independently',as
   assert.equal((await configure(wake,identity,{provider:'qoder'})).nextAction,'park');
   assert.equal(verified,1);assert.equal(fullReads,0);
   delete binding.wake;
-  await wake.bind(identity,{provider:'qoder',threadId:'session',experimentalAcknowledged:true});
-  assert.equal(fullReads,1);
+  await wake.bind(identity,{provider:'qoder',threadId:'session'});
+  assert.equal(fullReads,0);assert.equal(verified,2);
 });
 test('wrong directory does not bind and no other provider is probed',async()=>{
-  const f=fixture({codearts:()=>({thread:{id:'session',cwd:require('node:path').dirname(process.cwd())}}),mimo:info},'worker');
-  assert.equal((await configure(f.wake,f.identity,{provider:'codearts'})).nextAction,'attention');assert.equal(f.binding.wake,undefined);
-  assert.deepEqual(f.calls,['codearts']);
+  const f=fixture({qoder:()=>({thread:{id:'session',cwd:require('node:path').dirname(process.cwd())}}),mimo:info},'worker');
+  assert.equal((await configure(f.wake,f.identity,{provider:'qoder'})).nextAction,'attention');assert.equal(f.binding.wake,undefined);
+  assert.deepEqual(f.calls,['qoder']);
 });
 test('Codex requires a real turn ID; explicit supported failure remains attention',async()=>{
   const f=fixture({codex:info});assert.equal((await configure(f.wake,f.identity,{provider:'codex'})).nextAction,'attention');
@@ -70,7 +88,7 @@ test('Qoder and QoderCN aliases use the shared explicit wake provider',async()=>
 test('explicit unsupported host persists wait; existing wake and completion take precedence',async()=>{
   const f=fixture({},'worker');assert.equal((await configure(f.wake,f.identity,{provider:'other-host'})).nextAction,'wait');
   assert.equal((await configure(f.wake,f.identity)).nextAction,'wait');assert.equal(f.calls.length,0);
-  f.binding.wake={provider:'codearts'};assert.equal((await configure(f.wake,f.identity,{provider:'other-host'})).nextAction,'park');
+  f.binding.wake={provider:'qoder'};assert.equal((await configure(f.wake,f.identity,{provider:'other-host'})).nextAction,'attention');
   f.project.completedAt='now';assert.equal((await configure(f.wake,f.identity)).nextAction,'stop');
 });
 test('OpenCode supports all roles, preserves explicit model and never falls back to wait',async()=>{
@@ -85,11 +103,21 @@ test('OpenCode supports all roles, preserves explicit model and never falls back
   assert.equal(f.binding.continuation,undefined);
   await assert.rejects(configure(f.wake,f.identity,{provider:'opencode',noWake:true}),/wait-only/);
 });
+test('CodeArts and DSH support every role without falling back to wait',async()=>{
+  for(const role of ['brain','reviewer','worker'])for(const provider of ['codearts','dsh']){
+    const f=fixture({[provider]:info},role);
+    assert.equal((await configure(f.wake,f.identity,{provider})).nextAction,'park');
+    assert.equal(f.binding.wake.workspace,process.cwd());
+    await assert.rejects(configure(f.wake,f.identity,{provider,noWake:true}),/wait-only/);
+    const unavailable=fixture({},role);
+    assert.equal((await configure(unavailable.wake,unavailable.identity,{provider})).nextAction,'attention');
+    assert.equal(unavailable.binding.wake,undefined);
+  }
+});
 test('brain and reviewer reject worker-only providers before continuation is stored',async()=>{
   for(const role of ['brain','reviewer']){
     const f=fixture({},role);
-    await assert.rejects(configure(f.wake,f.identity,{provider:'codearts'}),/only supports codex, mimo, qoder or opencode/);
-    await assert.rejects(configure(f.wake,f.identity,{provider:'zcode'}),/only supports codex, mimo, qoder or opencode/);
+    await assert.rejects(configure(f.wake,f.identity,{provider:'zcode'}),/only supports .*dsh host providers/);
     assert.equal(f.binding.continuation,undefined);
   }
 });
@@ -97,7 +125,7 @@ test('brain and reviewer reject worker-only providers before continuation is sto
 test('real CLI connect negotiates wait and resume routes wait/park without starting work',async()=>{
   const fs=require('node:fs'),path=require('node:path');
   const {initialize,request}=require('../runtime/wizard.cjs');
-  const {serve}=require('../runtime/server.cjs');
+  const {serve}=require('./service-fixture.cjs');
   const {call}=require('../runtime/desktop-client.cjs');
   const execFile=require('node:util').promisify(require('node:child_process').execFile);
   const base=path.resolve('tmp');fs.mkdirSync(base,{recursive:true});
@@ -109,9 +137,21 @@ test('real CLI connect negotiates wait and resume routes wait/park without start
     const connected=await run(['connect','--role','worker','--workspace',workspace,'--session-id','session','--provider','other-host']);
     assert.equal(connected.continuation.mode,'wait');assert.equal(connected.nextAction,'wait');
     const credential=JSON.parse(fs.readFileSync(connected.credential,'utf8'));
-    assert.equal((await run(['resume','--credential',connected.credential,'--seconds','1'])).idle,true);
+    assert.match(connected.nextCommand, /resume --credential/);
+    assert.match(connected.nextInstruction, /不需要用户再次说 resume/);
+    for (const action of ['resume', 'wait']) {
+      const idle = await run([action,'--credential',connected.credential,'--seconds','1']);
+      assert.equal(idle.idle,true); assert.equal(idle.completed,false); assert.equal(idle.parked,false);
+      assert.equal(idle.nextAction,'resume'); assert.equal(idle.continuationMode,'wait');
+      assert.ok(idle.nextCommand.includes(connected.credential)); assert.match(idle.nextInstruction,/不能结束回合后等通知/);
+      assert.equal(fs.existsSync(connected.credential+'.wait.lock'),false);
+    }
+    await request(root,{action:'pause',projectId:connected.projectId});
+    const paused = await call(root,credential,{action:'resume'}); assert.equal(paused.nextAction,'wait'); assert.equal(paused.paused,true);
+    const pausedIdle = await run(['resume','--credential',connected.credential,'--seconds','1']); assert.equal(pausedIdle.nextAction,'resume');
+    await request(root,{action:'resume',projectId:connected.projectId});
     const state=await request(root);assert.equal(Object.keys(state.projects[connected.projectId].tasks).length,0);
-    await call(root,credential,{action:'wake-bind',provider:'codex',threadId:'session',turnId:'turn',experimentalAcknowledged:true});
+    await bindWake(root,credential,{provider:'codex',threadId:'session',turnId:'turn'});
     assert.equal((await run(['resume','--credential',connected.credential])).parked,true);
     fs.writeFileSync(connected.credential+'.wait.lock','test');
     await assert.rejects(run(['resume','--credential',connected.credential]),/wait/);
@@ -139,7 +179,7 @@ test('real CLI connect negotiates wait and resume routes wait/park without start
 test('wait-only worker connects with a logical invitation identity and no host session',async()=>{
   const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
   const {initialize}=require('../runtime/wizard.cjs');
-  const {serve}=require('../runtime/server.cjs');
+  const {serve}=require('./service-fixture.cjs');
   const execFile=require('node:util').promisify(require('node:child_process').execFile);
   const base=path.resolve('tmp');fs.mkdirSync(base,{recursive:true});
   const dir=fs.mkdtempSync(path.join(base,'logical-wait-')),root=path.join(dir,'data'),workspace=path.join(dir,'work');fs.mkdirSync(workspace);initialize(root);
@@ -154,7 +194,7 @@ test('wait-only worker connects with a logical invitation identity and no host s
 
 test('Codex resolves its exact host turn and preserves platform on setup failure',async()=>{
   const f=fixture({codex:info},'brain');
-  const original=f.wake.forProvider;
+  const original=f.wake.forProvider.bind(f.wake);
   f.wake.forProvider=p=>({...original(p),resolveTurn:async(id,cwd)=>{assert.equal(id,'session');assert.equal(cwd,process.cwd());return 'host-turn';}});
   assert.equal((await configure(f.wake,f.identity,{provider:'codex'})).nextAction,'park');
   assert.equal(f.binding.wake.turnId,'host-turn');assert.equal(f.binding.provider,'codex');

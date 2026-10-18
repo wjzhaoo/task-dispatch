@@ -9,7 +9,7 @@ function setup(t){
  fs.mkdirSync(path.resolve('tmp'),{recursive:true});
  const base=fs.mkdtempSync(path.resolve('tmp/planning-')),workspace=path.join(base,'work');fs.mkdirSync(workspace);
  let store=new Store(path.join(base,'data'));
- const make=()=>{const d=new Dispatcher(store,{enableRealCalls:false},()=>{throw Error('no model');});return {d,desktop:new Desktop(d)};};
+ const make=()=>{const d=new Dispatcher(store,{maxConcurrent:2});return {d,desktop:new Desktop(d)};};
  let {d,desktop}=make();
  const brain=desktop.attach({workspace,role:'brain',clientId:'brain123',token:'a'.repeat(64)});
  const worker=desktop.attach({workspace,role:'worker',clientId:'worker123',token:'b'.repeat(64)});
@@ -23,11 +23,11 @@ function setup(t){
   p:()=>store.state.projects[brain.projectId],
   add:(id,deps=[])=>d.addTask(brain.projectId,{id,title:id,instructions:'i',acceptance:'a',allowedPaths:['README.md'],dependsOn:deps}),
   accepted:()=>{x.add('D03');store.change(s=>{s.projects[brain.projectId].tasks.D03.state='accepted';});d.tick();},
-  bind:()=>wake.bind(brain,{provider:'codex',threadId:'brain',turnId:'turn',experimentalAcknowledged:true}),
+  bind:()=>wake.bind(brain,{provider:'codex',threadId:'brain',turnId:'turn'}),
   restart:()=>{store.close();store=new Store(path.join(base,'data'));({d,desktop}=make());wake=new Wake(desktop,adapter);d.recover();d.tick();}
  };t.after(()=>store.close());return x;
 }
-test('accepted legacy queue produces durable closeout; park refuses omission and worker cannot resolve',async t=>{
+test('accepted stage queue produces durable closeout; park refuses omission and worker cannot resolve',async t=>{
  const x=setup(t);await x.bind();x.accepted();
  const first=x.wake.park(x.brain);assert.equal(first.parked,false);assert.equal(first.job.kind,'planning');
  x.restart();assert.equal(x.desktop.claim(x.brain).planningId,first.job.planningId);
@@ -43,8 +43,8 @@ test('accepted legacy queue produces durable closeout; park refuses omission and
 // [AI-added] 2026-09-14 22:53
 test('auxiliary claims carry platform-neutral continuation instructions on wake hosts',async t=>{
  const x=setup(t);await x.bind();x.accepted();
- for(const provider of ['codex','codearts',undefined,'mimo']){
-  x.store.change(s=>{s.projects[x.brain.projectId].bindings.brain.wake=provider?{provider}:null;});
+ for(const provider of ['codex','qoder',undefined,'mimo']){
+  x.store.change(s=>{s.projects[x.brain.projectId].bindings.brain.provider=provider; s.projects[x.brain.projectId].bindings.brain.wake=provider?{provider,threadId:'brain',turnId:'turn',...(provider==='qoder'?{workspace:x.p().workspace}:{})}:null;});
   const job=x.desktop.claim(x.brain),original=require('../runtime/core/planning.cjs').job(x.p());
   if(provider)assert.match(job.prompt,/成功后必须.*实际执行 park/);
   else assert.equal(job.prompt,original.prompt);
@@ -85,7 +85,7 @@ test('delivered planning wake flags only idle unclaimed closeout after grace wit
  const x=setup(t);await x.bind();x.accepted();await x.wake.run();
  // [AI-added] 2026-09-14 22:59
  x.wake.adapter={forProvider:()=>x.adapter};
- x.store.change(s=>{s.projects[x.brain.projectId].bindings.brain.wake.provider='mimo';});
+ x.store.change(s=>{s.projects[x.brain.projectId].bindings.brain.provider='mimo';s.projects[x.brain.projectId].bindings.brain.wake.provider='mimo';});
  x.store.change(s=>{s.projects[x.brain.projectId].planning.wakeNotice.at=new Date(Date.now()-61_000).toISOString();});
  x.status('active');await x.wake.run();assert.equal(x.p().planning.needsAttention,undefined);
  x.status('idle');await x.wake.run();assert.equal(x.p().planning.needsAttention,true);assert.match(x.p().planning.wakeNotice.error,/unclaimed/);assert.equal(x.sends(),1);
@@ -94,7 +94,7 @@ test('delivered planning wake flags only idle unclaimed closeout after grace wit
  assert.equal(y.desktop.claim(y.brain).kind,'planning');await y.wake.run();assert.equal(y.p().planning.needsAttention,undefined);assert.equal(y.sends(),1);
 });
 // [AI-added] 2026-09-14 22:59
-test('Codex delivered planning retains legacy behavior without timeout attention',async t=>{
+test('Codex delivered planning does not generate timeout attention without timeout attention',async t=>{
  const x=setup(t);await x.bind();x.accepted();await x.wake.run();
  x.store.change(s=>{s.projects[x.brain.projectId].planning.wakeNotice.at=new Date(Date.now()-120_000).toISOString();});
  x.adapter.read=async()=>{throw Error('Codex sent notices must not query status');};

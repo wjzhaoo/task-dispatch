@@ -16,7 +16,6 @@ function size(file) {
   return fs.readdirSync(file).reduce((n, f) => n + size(path.join(file, f)), 0);
 }
 function safeTarget(root, relative) {
-  // Previous implementation: if (!/^(artifacts|reviews|validations)\/[a-zA-Z0-9_-]+(?:\/tree)?$/.test(relative)) throw Error('Invalid cleanup target');
   // [AI-added] 2026-09-24 10:55: Batch validation trees live one level below the attempt.
   if (!/^(?:artifacts|reviews)\/[a-zA-Z0-9_-]+$|^validations\/[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)?\/tree$/.test(relative)) throw Error('Invalid cleanup target');
   const base = fs.realpathSync(root), target = path.resolve(base, ...relative.split('/'));
@@ -96,8 +95,6 @@ function planV2(dispatcher, now = Date.now()) {
     const refs = new Set();
     artifact(refs, task.artifactId);
     artifact(refs, task.reviewBaselineId);
-    artifact(refs, task.stageFallback?.originalArtifactId);
-    artifact(refs, task.stageFallback?.compositeArtifactId);
     for (const recovery of [task.scopeRecovery, ...task.attempts.map(run => run.scopeRecovery)]) {
       artifact(refs, recovery?.originalBaselineId);
       artifact(refs, recovery?.rejectedArtifactId);
@@ -128,8 +125,6 @@ function planV2(dispatcher, now = Date.now()) {
       if (!finished || keep.has(task.id) || recent) artifact(live, task.artifactId);
       if (!finished) {
         artifact(live, task.reviewBaselineId);
-        artifact(live, task.stageFallback?.originalArtifactId);
-        artifact(live, task.stageFallback?.compositeArtifactId);
         const worker = task.attempts.findLast(run => run.role === 'worker');
         artifact(live, worker?.reviewBaselineId || worker?.baselineId);
       }
@@ -143,7 +138,7 @@ function planV2(dispatcher, now = Date.now()) {
       for (const member of batch.frozenMembers || []) artifact(refs, member.artifactId);
       for(const attempt of [...(batch.attemptHistory||[]),...(batch.attempt?[batch.attempt]:[])]) {
         artifact(refs,attempt.artifactId);refs.add('reviews/'+attempt.id);refs.add('validations/'+attempt.id+'/tree');
-        for(const taskId of batch.reviewTaskIds||batch.members.map(m=>m.taskId))refs.add('validations/'+attempt.id+'/'+taskId+'/tree');
+        for(const taskId of batch.reviewTaskIds)refs.add('validations/'+attempt.id+'/'+taskId+'/tree');
       }
       const active = !require('./stage-review.cjs').ended(batch) || !batches.some(r=>r.stageId===batch.stageId&&r.verdict==='pass') || dispatcher.active.has(project.id) ||
         !!(batch.attempt && !batch.attempt.settled);
@@ -163,7 +158,6 @@ function planV2(dispatcher, now = Date.now()) {
   return { ...result, previewId: sha(JSON.stringify(result)) };
 }
 function apply(dispatcher, previewId, now = Date.now()) {
-  // Previous implementation: const p = plan(dispatcher, now);
   // [AI-added] 2026-09-24 10:54: Apply the same reference-aware plan shown in the preview.
   const p = planV2(dispatcher, now);
   if (previewId !== p.previewId) throw Error('Cleanup preview changed; preview again before applying');
@@ -176,7 +170,6 @@ function apply(dispatcher, previewId, now = Date.now()) {
   if (removed.length) dispatcher.store.change(s => {
     const removedSet = new Set(removed);
     for (const project of Object.values(s.projects)) for (const t of Object.values(project.tasks)) {
-      // Previous implementation: if (!terminal(t)) continue;
       // [AI-added] 2026-09-24 10:54: Settled review copies are disposable even during a later retry.
       for (const r of t.attempts) if (r.settled && removedSet.has('reviews/' + r.id)) delete r.delivery;
     }
@@ -191,6 +184,5 @@ function dispatchStatus(dispatcher) {
   const reason=dispatcher.storageBlocked ? (storage?.error ? '存储检查失败：'+storage.error : `缓存空间超限：${((storage?.totalBytes||0)/1024**3).toFixed(2)} GiB / ${((storage?.maxBytes||0)/1024**3).toFixed(2)} GiB；任务已入队但暂停派发，请运行清理缓存.bat。`) : dispatcher.fatal?.message || (dispatcher.stopping?'调度服务正在停止':null);
   return {blocked:!!reason,reason,storage};
 }
-// Previous implementation: module.exports = { policy, plan, apply, size, safeTarget, dispatchStatus };
 // [AI-added] 2026-09-24 10:54: Expose the rolling-retention plan to CLI and server callers.
 module.exports = { policy, plan: planV2, apply, size, safeTarget, dispatchStatus };

@@ -16,17 +16,19 @@ node scripts/install.js opencode
 node "<客户端绝对路径>/runtime/desktop-client.cjs" connect --provider opencode --role brain --session-id <当前真实ses_会话ID>
 ```
 
-reviewer 使用 `--role reviewer`；worker 使用 `--role worker --worker-id <邀请指定编号>`，能力参数沿用邀请。改绑使用管理台生成的 OpenCode 提示词；`--invitation-id` 表示授权，不能替代会话 ID。不从标题、目录、旧数据库表或其他平台的环境变量推断当前会话。
+reviewer 使用 `--role reviewer`；worker 使用 `--role worker --worker-id <邀请指定编号>`，能力参数沿用邀请。改绑使用管理台生成的 OpenCode 提示词；`--invitation-id` 表示授权，不能替代会话 ID。优先使用宿主提供的 `OPENCODE_SESSION_ID`；缺失时可执行 `discover-session --provider opencode --invitation-id <本邀请标识>`，只读匹配当前工作目录中用户消息的完整邀请标识，仅唯一、未归档的会话可返回身份。不从标题、目录、旧数据库表或其他平台的环境变量推断当前会话。
 
 连接成功后按回执处理 job 或展示接入邀请。brain 等用户开始指令再执行 `start-work --confirmed`。空闲及提交后实际执行 `resume --credential "<本端凭据路径>"`；`parked:true` 时结束当前回合，服务有任务时唤醒原会话。会话核验失败时报告 attention，补齐条件后重试 resume。
 
 | 配置 | 用途 |
 | --- | --- |
 | `TASK_DISPATCH_OPENCODE_DB` | SQLite 数据库；默认 `~/.local/share/opencode/opencode.db`，设置 `XDG_DATA_HOME` 时使用该数据目录 |
-| `TASK_DISPATCH_OPENCODE_CLI` | 官方 CLI 可执行文件；默认按数字版本从 `%APPDATA%/ai.opencode.desktop/cli/2.x.x/` 查找，再检查 PATH |
+| `TASK_DISPATCH_OPENCODE_CLI` | 官方 CLI 可执行文件；默认按数字版本从 `%APPDATA%/ai.opencode.desktop/cli/2.x.x/` 或带当前架构后缀的目录（如 `2.0.32-x64/`）查找，再检查 PATH |
 | `TASK_DISPATCH_OPENCODE_AUTO` | 仅显式设为 `1` 才增加 `--auto`；默认保留原会话权限 |
 
 自定义配置须在启动 task-dispatch 服务前设置；已运行的服务需重启以加载新版代码和环境变量。默认发送 `run --session <真实ID> --format json`，沿用原会话模型；仅显式传入 `--model provider/model` 时覆盖模型。使用无 shell 的进程启动。CLI 命令形式见 [OpenCode 官方 CLI 说明](https://opencode.ai/v2/docs/cli/commands/)。
+
+IDE 更新或重启后可能替换版本目录。适配器每次核验、发送时重新发现自动选择的 CLI，不缓存旧版本路径；显式配置的 CLI 路径保持优先，失效时需修正配置。启动失败且确定未发送的通知会重试；恢复时继续访问原 `ses_...` 会话，不需要重新接入。CLI 错误仅保留有长度限制且已脱敏的诊断，不收集标准输出中的助手正文或工具结果，诊断会保留在通知错误中供排查。
 
 适配器只读查询指定 ID 的 `session_v2` 和 `session_message`，结合最后一条事件及 `session_inbox/session_pending` 判定状态。旧 `time_idle` 不能证明当前回合空闲。归档、缺失、目录不符或未知队列结构均不会发送。
 

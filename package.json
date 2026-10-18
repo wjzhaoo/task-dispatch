@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test tests/*.test.cjs",
+    "test": "node --test --test-concurrency=4 tests/*.test.cjs",
     "verify:skill": "node scripts/verify.js",
     "start": "node runtime/desktop-client.cjs --help",
     "dashboard": "node runtime/wizard.cjs"

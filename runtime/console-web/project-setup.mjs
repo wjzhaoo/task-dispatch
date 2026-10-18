@@ -34,7 +34,7 @@ function revealInvalid(form) { form.addEventListener('invalid', event => { const
 export function openCreateTask({ api, onCreated, workspace = '', existing = false, projects = [] }) {
   if (!createDialog) {
     createDialog = element('dialog', undefined, 'setup-dialog'); createDialog.id = 'create-task-dialog';
-    createDialog.innerHTML = '<form id="setup-form"><div class="dialog-heading"><h2 id="setup-heading">创建目标</h2><button type="button" id="setup-close" aria-label="关闭创建目标">✕</button></div><p class="subtle">同一项目的目标按顺序执行；已有成员直接沿用，只邀请缺少的成员。</p><label>目标名称<input id="setup-title" required maxlength="120" placeholder="例如：完成游戏存档功能"></label><label>项目工作目录<input id="setup-workspace" list="setup-projects" required placeholder="已有项目目录的绝对路径" spellcheck="false"><datalist id="setup-projects"></datalist></label><label>目标与验收要求<textarea id="setup-objective" required maxlength="12000" rows="5" placeholder="说明要完成什么，以及如何判断完成"></textarea></label><p id="setup-reuse" class="impact" hidden>将沿用这个项目的成员和历史。当前目标执行期间，新增目标会排队等待。</p><div id="setup-new-team"><div class="setup-fixed"><span>大脑</span><span>初审端</span><span>执行员</span></div><p class="subtle">默认三名成员。平台及模型由各成员会话明确选择，通用执行员不预设模型档位。</p><details id="setup-advanced"><summary>高级成员设置</summary><div class="panel-heading"><h3>执行员</h3><button type="button" id="setup-add">添加执行员</button></div><div id="setup-workers"></div></details></div><p id="setup-error" class="setup-error" role="alert"></p><div class="dialog-actions"><button type="submit" class="primary" id="setup-submit" value="auto">创建并开始</button><button type="submit" id="setup-save" value="manual">仅保存</button></div><p class="subtle">「创建并开始」即授权开始；成员就绪且轮到这个目标时自动执行。「仅保存」后可再选择开始。</p></form>';
+    createDialog.innerHTML = '<form id="setup-form"><div class="dialog-heading"><h2 id="setup-heading">创建目标</h2><button type="button" id="setup-close" aria-label="关闭创建目标">✕</button></div><p class="subtle">同一项目的目标按顺序执行；已有成员直接沿用，只邀请缺少的成员。</p><label>目标名称<input id="setup-title" required maxlength="120" placeholder="例如：完成游戏存档功能"></label><label>项目工作目录<input id="setup-workspace" list="setup-projects" required placeholder="已有项目目录的绝对路径" spellcheck="false"><datalist id="setup-projects"></datalist></label><label>目标与验收要求<textarea id="setup-objective" required maxlength="12000" rows="5" placeholder="说明要完成什么，以及如何判断完成"></textarea></label><p id="setup-reuse" class="impact" hidden>将沿用这个项目的成员和历史。新增目标先保存，点击开始后才加入执行队列。</p><div id="setup-new-team"><div class="setup-fixed"><span>大脑</span><span>初审端</span><span>执行员</span></div><p class="subtle">默认三名成员。平台及模型由各成员会话明确选择，通用执行员不预设模型档位。</p><details id="setup-advanced"><summary>高级成员设置</summary><div class="panel-heading"><h3>执行员</h3><button type="button" id="setup-add">添加执行员</button></div><div id="setup-workers"></div></details></div><p id="setup-error" class="setup-error" role="alert"></p><div class="dialog-actions"><button type="submit" class="primary" id="setup-submit" value="manual">创建目标</button></div><p class="subtle">创建后保持待开始。所有成员就绪后，在项目页面点击「开始」，即可执行或加入队列。</p></form>';
     document.body.append(createDialog); revealInvalid($('setup-form'));
   }
   const context = existing ? workspace : 'home';
@@ -58,7 +58,7 @@ export function openCreateTask({ api, onCreated, workspace = '', existing = fals
     event.preventDefault();
     let payload;
     try {
-      payload = { title: $('setup-title').value.trim(), workspace: $('setup-workspace').value.trim(), objective: $('setup-objective').value.trim(), startMode: event.submitter?.value === 'manual' ? 'manual' : 'auto',
+      payload = { title: $('setup-title').value.trim(), workspace: $('setup-workspace').value.trim(), objective: $('setup-objective').value.trim(), startMode: 'manual',
         ...(!reusesProject() ? { workers: readWorkers($('setup-workers')) } : {}) };
     } catch (error) { $('setup-error').textContent = error.message; return; }
     const signature = JSON.stringify(payload);
@@ -97,12 +97,13 @@ export function openTeamSettings({ project, onSave }) {
   teamDialog.showModal();
 }
 
-export function renderTeam(project, { onInvite, onGoalAction, onConfigure }) {
+export function renderTeam(project, { onInvite, onGoalAction, onConfigure, onMemberAction }) {
   let panel = $('project-team'), goalPanel = $('project-goals');
   if (!project?.team) { panel?.remove(); goalPanel?.remove(); return; }
   if (!goalPanel) { goalPanel = element('section', undefined, 'panel goals-panel'); goalPanel.id = 'project-goals'; $('stats').before(goalPanel); }
   if (!panel) { panel = element('section', undefined, 'panel team-panel'); panel.id = 'project-team'; $('stats').before(panel); }
-  const team = project.team, goals = project.goals || [], queue = project.queue || [], blocked = !!project.archivedAt || !!project.completedAt;
+  goalPanel.hidden = !project.team.managed;
+  const team = project.team, goals = project.goals || [], queue = project.queue || [], blocked = !!project.readOnly || !!project.archivedAt || !!project.completedAt;
   if (team.ready < team.total) { if (panel.nextElementSibling !== goalPanel) goalPanel.before(panel); }
   else if (goalPanel.nextElementSibling !== panel) panel.before(goalPanel);
   const goalSignature = JSON.stringify([goals, queue, project.activeGoalId, team.ready, team.total, project.paused, blocked]);
@@ -119,26 +120,27 @@ export function renderTeam(project, { onInvite, onGoalAction, onConfigure }) {
       if (goal.state === 'queued') facts.push('队列第 ' + (queue.indexOf(goal.id) + 1) + ' 位');
       row.append(element('p', facts.join(' · '), 'subtle'));
       if (goal.blockedReason) row.append(element('p', goal.blockedReason, 'setup-error'));
-      if (goal.state === 'queued' && !project.activeGoalId && queue[0] === goal.id) row.append(element('p', project.paused ? '项目暂停，等待继续' : `等待成员就绪 ${team.ready} / ${team.total}，就绪后自动开始`, 'subtle'));
+      if (goal.state === 'queued' && !project.activeGoalId && queue[0] === goal.id) row.append(element('p', project.paused ? '项目暂停，等待继续' : `已确认开始，等待调度 · 成员就绪 ${team.ready} / ${team.total}`, 'subtle'));
       const details = element('details'), summary = element('summary', '目标与验收要求'); details.append(summary, element('p', goal.objective || '沿用原项目已登记的工作', 'task-objective'));
       details.open = goal.id === project.activeGoalId; row.append(details);
       if (goal.summary) row.append(element('p', goal.summary));
       const actions = element('div', undefined, 'goal-actions'), error = element('p', '', 'setup-error'); error.setAttribute('role', 'alert');
-      for (const [action, text] of goal.state === 'draft' ? [['start-goal', '开始排队'], ['cancel-goal', '取消目标']] : goal.state === 'queued' ? [['cancel-goal', '取消目标']] : []) {
-        const button = element('button', text, action === 'start-goal' ? 'primary' : ''); button.type = 'button'; button.disabled = blocked;
-        button.onclick = async () => { button.disabled = true; try { await onGoalAction(project, goal, action); } catch (failure) { error.textContent = failure.message; } finally { button.disabled = blocked; } }; actions.append(button);
+      for (const [action, text] of goal.state === 'draft' ? [['start-goal', project.activeGoalId || queue.length ? '加入队列' : '开始'], ['cancel-goal', '取消目标']] : goal.state === 'queued' ? [['cancel-goal', '取消目标']] : []) {
+        const button = element('button', text, action === 'start-goal' ? 'primary' : ''); button.type = 'button'; const disabled = blocked || (action === 'start-goal' && (project.paused || team.ready !== team.total)); button.disabled = disabled;
+        if (action === 'start-goal' && disabled) button.title = project.paused ? '请先继续项目' : '所有成员就绪后才能开始';
+        button.onclick = async () => { button.disabled = true; try { await onGoalAction(project, goal, action); } catch (failure) { error.textContent = failure.message; } finally { button.disabled = disabled; } }; actions.append(button);
       }
       row.append(actions, error); list.append(row);
     }
     if (!goals.length) list.append(element('p', '尚无目标，点击「新增目标」开始。', 'subtle'));
     goalPanel.replaceChildren(heading, list);
   }
-  const signature = JSON.stringify(team) + blocked;
+  const signature = JSON.stringify([team, project.connections, blocked]);
   if (panel.dataset.signature === signature) return;
   panel.dataset.signature = signature;
   const heading = element('div', undefined, 'panel-heading'), intro = element('div');
   intro.append(element('h2', '项目成员'), element('p', `已就绪 ${team.ready} / ${team.total} · 后续目标直接复用，缺少的成员可以同时加入。`)); heading.append(intro);
-  const configure = element('button', '调整成员'); configure.type = 'button'; configure.disabled = !team.canConfigure;
+  const configure = element('button', '调整成员'); configure.type = 'button'; configure.disabled = blocked || !team.canConfigure;
   configure.title = team.canConfigure ? '调整执行员配置' : '活动目标结束后可调整成员'; configure.onclick = () => onConfigure(project); heading.append(configure);
   const grid = element('div', undefined, 'team-grid');
   for (const member of team.members) {
@@ -146,11 +148,50 @@ export function renderTeam(project, { onInvite, onGoalAction, onConfigure }) {
     row.append(element('h3', member.role === 'brain' ? '大脑' : member.role === 'reviewer' ? '初审端' : member.workerId === 'default' ? '执行员' : '执行员 · ' + member.workerId),
       element('p', member.responsibilities), element('span', member.message, 'badge ' + (member.state === 'ready' ? '' : 'warning')));
     if (member.connected) row.append(element('small', '沿用当前会话' + (member.provider ? ' · ' + member.provider : ''), 'subtle'));
-    if (!member.connected && !blocked) {
+    if (team.managed && !member.connected && !blocked) {
       const invite = element('button', '复制加入邀请'); invite.type = 'button';
       invite.onclick = async () => { invite.disabled = true; try { await onInvite(project, member); } finally { invite.disabled = false; } }; row.append(invite);
+    }
+    if (member.connected && !blocked) {
+      const actions = element('div', undefined, 'goal-actions');
+      const connection = project.connections?.find(c => c.binding === member.binding);
+      for (const [action, label] of [['rebind-invite', '改绑'], ['detach', '解绑'], ...(connection?.rebindInvitation && ['pending', 'claimed'].includes(connection.rebindInvitation.status) ? [['rebind-cancel', '取消改绑邀请']] : [])]) {
+        const button = element('button', label); button.type = 'button';
+        button.onclick = () => onMemberAction(action, member.binding, connection?.rebindInvitation?.id); actions.append(button);
+      }
+      row.append(actions);
     }
     grid.append(row);
   }
   panel.replaceChildren(heading, grid);
+}
+
+const taskActions = new Set(['retry', 'task-budget', 'assign', 'wake-retry', 'wake-remind', 'reset-task']);
+const goalActions = new Set(['start-goal', 'cancel-goal']);
+const memberActions = new Set(['detach', 'rebind-invite', 'rebind-cancel']);
+
+// Capture the clicked card's identity once. Missing targets must never select another card.
+export function commandTarget(project, action, input = {}) {
+  if (!project?.id || project.readOnly) throw Error('当前项目不可操作，请刷新页面。');
+  const target = { projectId: project.id };
+  if (taskActions.has(action)) {
+    const task = project.tasks?.find(item => item.id === input.taskId);
+    if (!task) throw Error('该任务已不存在，请刷新后从任务卡片重新操作。');
+    target.taskId = task.id;
+    target.attemptId = task.attempts?.at(-1)?.id;
+  } else if (goalActions.has(action)) {
+    const goal = project.goals?.find(item => item.id === input.goalId);
+    if (!goal) throw Error('该目标已不存在，请刷新后从目标卡片重新操作。');
+    target.goalId = goal.id;
+  } else if (memberActions.has(action)) {
+    const connection = project.connections?.find(item => item.binding === input.binding);
+    if (!connection?.clientId) throw Error('该成员连接已不存在，请刷新后从成员卡片重新操作。');
+    target.binding = connection.binding;
+    target.clientId = connection.clientId;
+    if (action === 'rebind-cancel') {
+      if (!input.invitationId || connection.rebindInvitation?.id !== input.invitationId) throw Error('改绑邀请已变化，请刷新后重新操作。');
+      target.invitationId = input.invitationId;
+    }
+  }
+  return Object.freeze(target);
 }

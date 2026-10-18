@@ -65,37 +65,24 @@ test('real adapter discovery keeps credentials internal and uses host-specific r
  const secret='b'.repeat(64),file=path.join(dir,'mimo.json'),bridge=path.join(dir,'bridge.json');
  fs.writeFileSync(file,JSON.stringify({api:1,port:12345,token:secret}));
  fs.writeFileSync(bridge,JSON.stringify({version:2,directory:workspace,url:'http://127.0.0.1:12345',token:secret}));
- for(const provider of ['mimo','codearts']){
+ for(const provider of ['mimo']){
   const routes=[];
   const fetchImpl=async(url,options)=>{
    const route=new URL(url).pathname;routes.push(route);
    assert.equal(options.headers.Authorization,'Bearer '+secret);
    return Response.json(route.endsWith('/sessions')?[{id:'real',directory:workspace}]:[user()]);
   };
-  const adapter=provider==='mimo'?new(require('../runtime/adapters/mimo-wake.cjs').MimoWake)({credentialFile:file,fetchImpl}):new(require('../runtime/adapters/codearts-wake.cjs').CodeArtsWake)({discoveryDir:dir,fetchImpl});
+  const adapter=new(require('../runtime/adapters/mimo-wake.cjs').MimoWake)({credentialFile:file,fetchImpl});
   const result=await discover({workspace,invitationId,provider},adapters({[provider]:adapter}));
   assert.equal(result.sessionId,'real');assert.ok(!JSON.stringify(result).includes(secret));
-  assert.deepEqual(routes,provider==='mimo'?['/v1/sessions','/v1/sessions/real/messages']:['/v1/sessions','/v1/session/real/messages']);
+  assert.deepEqual(routes,['/v1/sessions','/v1/sessions/real/messages']);
  }
 });
-test('CodeArts discovers the project bridge when global and old session records point elsewhere',async()=>{
- const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
- const dir=fs.mkdtempSync(path.resolve('tmp/discovery-multi-'));
- const record=(name,sessionId,directory,port)=>fs.writeFileSync(path.join(dir,name),JSON.stringify({version:2,sessionId,directory,url:'http://127.0.0.1:'+port,token:'a'.repeat(64)}));
- const filename=id=>crypto.createHash('sha256').update(id).digest('hex')+'.json';
- record('bridge.json',undefined,path.dirname(workspace),12340);
- record(filename('source'),'source',workspace,12341);
- record(filename('real'),'real',workspace,12342);
- const calls=[];
- const a=new(require('../runtime/adapters/codearts-wake.cjs').CodeArtsWake)({discoveryDir:dir,fetchImpl:async(url)=>{
-  const u=new URL(url);calls.push(u.href);
-  if(u.port!=='12341')throw Error('old kernel is gone');
-  return Response.json(u.pathname.endsWith('/sessions')?[{id:'real',directory:workspace}]:[user()]);
- }});
- const result=await discover({workspace,invitationId,provider:'codearts'},adapters({codearts:a}));
- assert.equal(result.sessionId,'real');
- assert.ok(calls.includes('http://127.0.0.1:12341/v1/session/real/messages'));
- assert.ok(!calls.some(url=>url.includes(':12340/')));
+test('CodeArts discovery aliases use their own host',async()=>{
+ for(const provider of ['codearts','codeartsdoer']){
+  const result=await discover({workspace,invitationId,provider},adapters({codearts:host()}));
+  assert.equal(result.identified,true);assert.equal(result.provider,'codearts');
+ }
 });
 test('MiMo preserves Desktop effective permission defaults and explicit restrictions',()=>{
  const {effectivePermission:perm}=require('../runtime/adapters/mimo-wake.cjs');

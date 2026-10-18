@@ -4,26 +4,24 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+function connectionRefused(error) { return [error.code, error.cause?.code].includes('ECONNREFUSED'); }
 class CodeArtsWake {
   constructor({ credentialFile, discoveryDir, fetchImpl = fetch, timeoutMs = 10000 } = {}) {
     this.file = credentialFile;
     this.dir = discoveryDir || path.join(os.homedir(), '.codeartsdoer', 'task-dispatch');
     this.fetch = fetchImpl; this.timeoutMs = timeoutMs;
   }
-  discovery(binding) {
+  discovery(binding, {generic = false} = {}) {
     if (typeof binding.threadId !== 'string' || !binding.threadId.trim()) throw Error('CodeArts session ID required');
     const name = crypto.createHash('sha256').update(binding.threadId).digest('hex') + '.json';
-    /* Previous implementation:
-    const c = JSON.parse(fs.readFileSync(this.file || path.join(this.dir, name), 'utf8'));
-    */
-    // [AI-added] 2026-09-14 20:18
-    const selected=this.file||[path.join(this.dir,name),path.join(this.dir,'bridge.json')].find(fs.existsSync);
+    const selected=this.file||(generic ? [path.join(this.dir,'bridge.json')] : [path.join(this.dir,name),path.join(this.dir,'bridge.json')]).find(fs.existsSync);
     if(!selected)throw Error('CodeArts discovery file not found');
     const c = JSON.parse(fs.readFileSync(selected, 'utf8'));
-    if(!c.sessionId)c.sessionId=binding.threadId;
+    if (c.sessionId === undefined && c.version === 2) c.sessionId=binding.threadId;
     const url = new URL(c.url);
     // [AI-added] 2026-09-14 20:10
-    if (![1,2].includes(c.version) || c.sessionId !== binding.threadId || typeof c.directory !== 'string' || !c.directory ||
+    if (![1,2].includes(c.version) || c.sessionId !== binding.threadId || typeof c.directory !== 'string' || !path.isAbsolute(c.directory) ||
+        (binding.workspace && path.relative(binding.workspace,c.directory) !== '') ||
         url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) ||
         url.username || url.password || url.pathname !== '/' || url.search || url.hash ||
         (c.version===1&&(typeof c.username !== 'string'||!c.username||c.username.includes(':')||typeof c.password !== 'string'||!c.password)) ||
@@ -33,12 +31,31 @@ class CodeArtsWake {
   }
   async request(binding, route, options = {}) {
     const c = this.discovery(binding);
+    try { return await this.requestWithConfig(binding, route, options, c); }
+    catch (error) {
+      // A restored session may still point at the previous process's port. Only a
+      // refused connection proves no prompt was accepted and permits switching.
+      if (this.file || !connectionRefused(error)) throw error;
+      let current;
+      try { current = this.discovery({...binding, workspace: c.directory}, {generic: true}); }
+      catch (discoveryError) { discoveryError.safeToRetry = true; throw discoveryError; }
+      if (current.url === c.url) throw error;
+      return this.requestWithConfig(binding, route, options, current);
+    }
+  }
+  async requestWithConfig(binding, route, options, c) {
     // [AI-added] 2026-09-14 20:10
     const bridgeRoute=route==='/session/status'?'/v1/status':route.endsWith('/message')?'/v1'+route.replace(/\/message$/,'/messages'):route.endsWith('/prompt_async')?'/v1'+route.replace(/\/prompt_async$/,'/prompt'):'/v1'+route;
     const url = new URL(c.version===2?bridgeRoute:route, c.url);
     if(c.version===1)url.searchParams.set('directory', c.directory);
-    return this.fetch(url.href, { ...options, redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs),
-      headers: { 'Content-Type': 'application/json; charset=utf-8', Authorization: c.version===2?'Bearer '+c.token:'Basic ' + Buffer.from(c.username + ':' + c.password).toString('base64') } });
+    if (options.method === 'POST' && binding.canSend && !binding.canSend()) { const e = Error('The binding or pending attempt changed before delivery'); e.safeToRetry = true; throw e; }
+    try {
+      return await this.fetch(url.href, { ...options, redirect: 'error', signal: AbortSignal.timeout(this.timeoutMs),
+        headers: { 'Content-Type': 'application/json; charset=utf-8', Authorization: c.version===2?'Bearer '+c.token:'Basic ' + Buffer.from(c.username + ':' + c.password).toString('base64') } });
+    } catch (error) {
+      if (connectionRefused(error)) error.safeToRetry = true;
+      throw error;
+    }
   }
   async json(binding, route) {
     const r = await this.request(binding, route);
@@ -84,20 +101,25 @@ class CodeArtsWake {
     if (!Array.isArray(messages)) throw Error('Unsupported CodeArts message history');
     return messages;
   }
-  async read(binding) {
+  async verify(binding) {
     const route = '/session/' + encodeURIComponent(binding.threadId);
     const session = await this.json(binding, route);
     // [AI-added] 2026-09-14 09:43
     // Previous: only the session ID and directory type were checked.
-    if (session.id !== binding.threadId || typeof session.directory !== 'string' ||
+    if (session.id !== binding.threadId || typeof session.directory !== 'string' || !path.isAbsolute(session.directory) ||
         path.relative(this.discovery(binding).directory, session.directory) !== '') throw Error('CodeArts session mismatch');
+    return {thread:{id:session.id,cwd:session.directory,reachable:true,status:{type:'unknown'}}};
+  }
+  async read(binding) {
+    const info = await this.verify(binding);
+    const route = '/session/' + encodeURIComponent(binding.threadId);
     const messages = await this.json(binding, route + '/message');
     if (!Array.isArray(messages)) throw Error('Unsupported CodeArts message history');
     const statuses = await this.json(binding, '/session/status');
     if (!statuses || Array.isArray(statuses) || typeof statuses !== 'object') throw Error('Unsupported CodeArts status');
     const status = statuses[binding.threadId]?.type;
     const type = !Object.hasOwn(statuses, binding.threadId) || status === 'idle' ? 'idle' : ['busy', 'retry'].includes(status) ? 'active' : 'unknown';
-    return { thread: { id: session.id, cwd: session.directory, status: { type } },
+    return { thread: { ...info.thread, status: { type } },
       turns: messages.map(m => ({ items: [{ type: m.info?.role === 'user' ? 'userMessage' : 'agentMessage',
         content: (m.parts || []).filter(p => p.type === 'text' && typeof p.text === 'string').map(p => ({ text: p.text })) }] })) };
   }

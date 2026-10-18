@@ -38,7 +38,7 @@ submit 在该状态返回 ok=false、receiptPersisted=true、settlementPending=t
 
 ## 项目快照
 
-快照是源码和必要资料的完整固定副本，不是 Git 提交。新策略默认排除 `.git`、`node_modules`、`.venv`、`__pycache__`、`.codeartsdoer`、工作目录根部的所有点开头目录（IDE/代理缓存，如 `.workbuddy-ai`、`.zcode`、`.trae`、`.godot`），以及项目根目录 `tmp/`；不自动照搬 `.gitignore`。根目录点目录的排除是范围修正，对旧策略同样生效，旧候选清单里的缓存文件不再阻塞结算；`.task-dispatch` 与 `.dispatch-evidence` 不受影响。旧任务保存的 version 1 策略继续按原范围复现，避免历史候选因升级失效。
+快照是源码和必要资料的完整固定副本，不是 Git 提交。v2 策略默认排除 `.git`、`node_modules`、`.venv`、`__pycache__`、工作目录根部的所有点开头目录（IDE/代理缓存，如 `.workbuddy-ai`、`.zcode`、`.trae`、`.godot`），以及项目根目录 `tmp/`；不自动照搬 `.gitignore`。`.task-dispatch` 与 `.dispatch-evidence` 保持可见。只支持 v2 策略，每次新尝试冻结 `.taskignore`；存储快照必须包含冻结的 `taskIgnoreRules`、`monitoredHash` 和完整性摘要，缺少字段时明确拒绝加载。
 
 目录职责固定如下：
 
@@ -115,11 +115,7 @@ Codex 桌面会话自动读取本机 `$CODEX_HOME/sessions`（未设置时为用
 
 ## 审核已有实现
 
-```powershell
-node runtime/cli.cjs prepare-review PROJECT_ID TASK_ID EVIDENCE_FILE.txt
-```
-
-只用于已登记、尚无任何执行尝试的 ready/blocked 任务。管理员提供现有实现及证据说明，服务生成候选后直接交给 brain。明确标记为 existing-candidate，不伪造修改前副本和执行员报告；审核路径是完整审核范围，不是声称已发生的差异。需要差异证据时应在说明中给出真实 Git 基线或既有证据文件。需修复结论仍会进入正常 worker 返修流程。
+已有实现也必须登记为阶段任务，由执行员按真实基线核对或修复并提交候选，再逐项初审和阶段终审。不能直接导入候选进入大脑终审，也不伪造修改前副本或执行记录。操作见 [阶段计划与终审](../skills/task-dispatch/references/stages.md)。
 
 ## 验证方案与进度
 
@@ -127,4 +123,4 @@ node runtime/cli.cjs prepare-review PROJECT_ID TASK_ID EVIDENCE_FILE.txt
 
 桌面客户端 `progress --file FILE.json` 接收 taskId、attemptId、递增 sequence、stage、summary。stage 为 reading/implementing/testing/preparing-report/blocked。只在实际阶段变化时上报，不启动模型心跳，不据沉默自动重派。
 
-任务预算、执行/审核次数与旧数据迁移详见 [任务尝试次数与兼容迁移](attempt-budgets.md)。
+任务预算和执行/审核次数详见 [任务尝试次数与分配](attempt-budgets.md)。

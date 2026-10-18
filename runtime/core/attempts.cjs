@@ -14,25 +14,9 @@ function limit(value) {
 }
 function exhausted(task) { return counts(task).total >= task.maxAttempts; }
 function projectExhausted(project) { return project.projectBudgetEnabled === true && project.turns >= project.maxTurns; }
-// Additive migration: never rewrite attempts, receipts, sessions or current ownership.
-// Old project limits have no provenance; retain the value but require explicit opt-in.
-function migrate(state) {
-  for (const p of Object.values(state.projects)) {
-    if (p.attemptPolicyVersion !== 1) {
-      p.projectBudgetEnabled = false;
-      p.attemptPolicyVersion = 1;
-    }
-    // Qoder direct wake added workspace verification after legacy bindings were already persisted.
-    // The binding belongs to this project, so migrate it additively without requiring every idle
-    // reviewer to run resume again after upgrading.
-    for (const b of Object.values(p.bindings || {})) if (b.wake?.provider === 'qoder' && !b.wake.workspace) b.wake.workspace = p.workspace;
-    for (const t of Object.values(p.tasks)) {
-      t.maxAttempts ??= DEFAULT_LIMIT;
-      t.plannedWorkerId ??= t.workerId || 'default';
-      if (!Object.hasOwn(t, 'plannedRequiredCapability')) t.plannedRequiredCapability = t.requiredCapability ?? null;
-      t.currentWorkerId ??= t.workerId || 'default';
-      t.workerId = t.currentWorkerId; // compatibility alias used by wake/handover/recovery
-    }
-  }
+function taskFields({ workerId, requiredCapability = null, maxAttempts = DEFAULT_LIMIT } = {}) {
+  const selected = require('./bindings.cjs').workerId(workerId);
+  return { contractRevision:1, maxAttempts: limit(maxAttempts), plannedWorkerId: selected, currentWorkerId: selected,
+    plannedRequiredCapability: requiredCapability, requiredCapability };
 }
-module.exports = { DEFAULT_LIMIT, counts, limit, exhausted, projectExhausted, migrate };
+module.exports = { DEFAULT_LIMIT, counts, limit, exhausted, projectExhausted, taskFields };

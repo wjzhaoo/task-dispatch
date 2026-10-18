@@ -7,7 +7,6 @@ const attempts = require('./attempts.cjs');
 const { pick, clean } = require('./monitor.cjs');
 
 function sourceKind(root, workspaces, home) {
-  if (registry.pathKey(root) === registry.pathKey(require('./data-root.cjs').legacyDataRoot(home))) return 'public';
   if ((workspaces || []).some(workspace => registry.pathKey(root) === registry.pathKey(require('./data-root.cjs').projectDataRoot(workspace)))) return 'project';
   return 'custom';
 }
@@ -17,13 +16,13 @@ function persistedProject(p, service, state={projects:{[p.id]:p},events:[]}) {
     if(key==='brain')for(const b of Object.values(p.reviewStages||{}))if(b.attempt&&!b.attempt.settled)active.push({taskId:'阶段 '+b.stageId+' / '+b.id,attemptId:b.attempt.id,claimed:!!b.attempt.claimedBy,state:b.state});
     // [AI-added] 2026-09-17 11:46
     const rebindInvitation=Object.values(p.rebindInvitations||{}).filter(invite=>invite.binding===key).sort((a,c)=>Date.parse(c.createdAt)-Date.parse(a.createdAt))[0];
-    return { id: `${p.id}/${key}/${b.clientId}`, binding: key, clientId: b.clientId, sessionId: b.sessionId || b.wake?.threadId,
-      provider: b.wake?.provider || b.provider || b.continuation?.provider || 'unknown', role: ['brain','reviewer'].includes(key) ? key : 'worker',
+    return { id: `${p.id}/${key}/${b.clientId}`, binding: key, clientId: b.clientId, sessionId: b.sessionId,
+      provider: b.provider || 'unknown', role: ['brain','reviewer'].includes(key) ? key : 'worker',
       workerId: key.startsWith('worker:') ? key.slice(7) : key === 'worker' ? 'default' : undefined, continuationError: clean(b.continuationError),
       wakeEnabled: !!b.wake, armed: !!b.armed, armedAt: b.armedAt || null, contact: null, observation: null, communication: 'unknown', observationStale: true,
       handoverPending: !!p.handovers?.[key], rebindInvitation:rebindInvitation?pick(rebindInvitation,['id','status','expiresAt','clientId','recover']):null, active };
   });
-  const tasks = Object.values(p.tasks || {}).map(t => ({ ...pick(t, ['id','title','state','error','maxAttempts','workerId','requiredCapability','blockKind','contractRevision','stageId','roundId','stageHeld']), dependsOn: t.dependsOn || [],
+  const tasks = Object.values(p.tasks || {}).map(t => ({ ...pick(t, ['id','title','state','error','maxAttempts','plannedWorkerId','currentWorkerId','plannedRequiredCapability','requiredCapability','blockKind','contractRevision','stageId','roundId','stageHeld']), dependsOn: t.dependsOn || [],
     supersedes:t.supersedes||[],resolution:t.resolution||null,attention:t.attention?pick(t.attention,['id','message','kind','createdAt','acknowledged']):null,
     budgetExhausted: attempts.exhausted(t), waitingForWorker: t.state === 'ready' && !matches(p, t), attempts: (t.attempts || []).map(a => ({ ...pick(a, ['id','role','workerId','provider','model','startedAt','claimedAt','settled','claimedBy']), settledAt: a.settledAt,
       progress: pick(a.progress, ['at','stage','summary']), wakeNotice: pick(a.wakeNotice, ['status','at','error','marker']), usage: a.usage || a.observedUsage || null,
@@ -54,7 +53,7 @@ function aggregateSnapshot(snapshot, currentRoot, options = {}) {
   for (const entry of registry.catalog(options)) if (!seenWorkspaces.has(registry.pathKey(entry.workspace))) {
     const id = entry.projectId || `catalog-${entry.key}`;
     projects.push({ id, workspace: entry.workspace, mode: 'desktop', paused: false, connections: [], tasks: [], readOnly: true,
-      alerts: [{ code: 'catalog_unavailable', message: entry.workspaceExists ? '项目服务目录不可用；请核对或迁移项目缓存。' : '项目工作目录已不存在；请核对项目位置。' }],
+      alerts: [{ code: 'catalog_unavailable', message: entry.workspaceExists ? '项目服务目录不可用；请核对服务目录位置，或在项目会话重新 connect。' : '项目工作目录已不存在；请核对项目位置。' }],
       service: { key: registry.keyOf(entry.dataRoot), dataRoot: entry.dataRoot, online: entry.online, kind: 'project', unavailable: !entry.dataExists } });
     seen.add(id); seenWorkspaces.add(registry.pathKey(entry.workspace));
   }

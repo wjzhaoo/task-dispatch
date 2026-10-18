@@ -35,7 +35,6 @@ function resolve(project, taskId, replacementTaskId, reason, actor = 'brain') {
   task.blockKind = null;
   task.resumePhase = null;
   delete task.scopeRecovery;
-  delete task.scopeRecoveryRequested;
   if (task.attention) task.attention.acknowledged = true;
   if (task.scopeAlert) task.scopeAlert.acknowledged = true;
   return { duplicate: false, task };

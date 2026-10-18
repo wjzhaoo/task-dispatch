@@ -7,6 +7,27 @@ const path = require('node:path');
 const usage = require('../runtime/core/codex-usage.cjs');
 const { CodexWake } = require('../runtime/adapters/codex-wake.cjs');
 
+test('Codex Desktop calls identify the caller source required by the current host schema', async () => {
+  const calls = [];
+  const wake = new CodexWake({rpcImpl: async (pipe, request) => {
+    calls.push(request);
+    // Desktop rejects a missing callerSource before executing the tool.
+    if (request.params.callerSource !== 'codex') return {error:{code:-32602,message:'Invalid app tool request'}};
+    return {result:{success:true,contentItems:[{type:'inputText',text:JSON.stringify({ok:true})}]}};
+  }});
+  wake.pipe = 'fixture-pipe';
+  const binding = {threadId:'real-thread',turnId:'real-turn'};
+  assert.deepEqual(await wake.read(binding), {ok:true});
+  assert.deepEqual(await wake.send(binding, 'fixture prompt'), {ok:true});
+  assert.deepEqual(calls.map(c => c.params.tool), ['read_thread','send_message_to_thread']);
+  for (const call of calls) {
+    assert.equal(call.params.threadId, binding.threadId);
+    assert.equal(call.params.turnId, binding.turnId);
+    assert.equal(call.params.namespace, 'codex_app');
+    assert.ok(call.params.callId);
+  }
+});
+
 test('Codex turn resolution chooses the current suffixed rollout over an older exact-name log', async t => {
   const base = path.resolve(__dirname, '../tmp');
   fs.mkdirSync(base, { recursive: true });

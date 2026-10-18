@@ -3,13 +3,13 @@ const path = require('node:path');
 const { id, sha, atomic, read, plainDirectory, desktopProjectId } = require('./storage.cjs');
 // [AI-added] 2026-09-22 09:20: Durable receipt existence is checked before any replacement.
 const fs = require('node:fs');
-const { snapshot, manifest, difference, changes, reservedNames, loadSnapshot, allowed, ignored } = require('./snapshot.cjs');
+const { snapshot, manifest, difference, changes, reservedNames, loadSnapshot, ignored } = require('./snapshot.cjs');
 const { parseResult } = require('./contracts.cjs');
 const {workerId:validateWorkerId,bindingKey,capabilities:validateCapabilities,matches} = require('./bindings.cjs');
 const attempts = require('./attempts.cjs');
 class Desktop {
   constructor(dispatcher) { this.d = dispatcher; this.store = dispatcher.store; dispatcher.desktop = this; }
-  attach({ workspace, role, clientId, token, sessionId, workerId, capabilities, replaceClientId, recover, confirmedStopped, managedRebind, rebindInvitationId, joinInvitationId }) {
+  attach({ workspace, role, clientId, token, sessionId, workerId, capabilities, replaceClientId, recover, confirmedStopped, managedRebind, rebindInvitationId, joinInvitationId, connection }) {
     if (sessionId !== undefined && (typeof sessionId !== 'string' || !sessionId.trim() || sessionId.length > 200)) throw Error('Invalid sessionId');
     if (!['brain', 'worker', 'reviewer'].includes(role)) throw Error('Role must be brain, worker or reviewer');
     // [AI-added] 2026-09-16 21:34
@@ -33,7 +33,6 @@ class Desktop {
       this.d.addProject({ id: projectId, workspace: dir, mode: 'desktop' });
       p = this.store.state.projects[projectId];
     }
-    if (p.mode !== 'desktop') throw Error('Workspace is registered in headless mode; use a separate workspace');
     if (p.archivedAt) throw Error('Project archived; restore it in the management console');
     // [AI-added] 2026-09-17 11:46
     let invitation;
@@ -47,8 +46,8 @@ class Desktop {
     const old = p.bindings?.[key];
     if(old && replaceClientId && old.clientId!==clientId) {
       if(old.clientId!==replaceClientId)throw Error('Binding changed during handover; inspect current owner');
-      if(!sessionId || typeof token!=='string'||!/^[a-f0-9]{64}$/.test(token))throw Error('Handover requires session and new token');
-      const next={previousClientId:old.clientId,clientId,tokenHash:sha(token),sessionId,capabilities:caps,...(managedRebind?{invitationId:rebindInvitationId}:{})};
+      if((!sessionId && (!connection?.provider || require('./platforms.cjs').continuationMode(connection.provider)!=='wait')) || typeof token!=='string'||!/^[a-f0-9]{64}$/.test(token))throw Error('Handover requires a verified wake session or explicit wait provider and a new token');
+      const next={previousClientId:old.clientId,clientId,tokenHash:sha(token),sessionId,capabilities:caps,...(connection?{connection}:{}),...(managedRebind?{invitationId:rebindInvitationId}:{})};
       // [AI-added] 2026-09-16 21:34
       const pending=p.handovers?.[key],differentPending=pending&&JSON.stringify(pending)!==JSON.stringify(next);
       if(differentPending&&!recover)throw Error('Another session is already waiting for handover');
@@ -57,19 +56,18 @@ class Desktop {
       // [AI-added] 2026-09-16 21:34
       if(recover){
         const result=require('./handover.cjs').recoverBinding(this.d,p.id,key,next,differentPending?pending.clientId:undefined);
-        return {projectId:p.id,role,clientId,handoverPending:false,...result};
+        return {projectId:p.id,role,clientId,...(role==='worker'?{workerId:validateWorkerId(workerId)}:{}),handoverPending:false,...result};
       }
       require('./handover.cjs').finish(this.d,p.id);
       const handoverPending=!!this.store.state.projects[p.id].handovers?.[key];
       return {projectId:p.id,role,clientId,...(role==='worker'?{workerId:validateWorkerId(workerId)}:{}),handoverPending,
-        ...(handoverPending?{message:'正在交接：旧端须提交在途任务或解决原执行员恢复；服务在安全边界自动换绑。新端暂不执行，请保留本会话并再次 connect 核对。'}:{})};
+        ...(handoverPending?{message:'正在交接：旧端须提交在途任务或解决原执行员恢复；服务在安全边界自动换绑。新端暂不执行，请保留本会话并执行 resume 等待交接和续接。'}:{})};
     }
     if(recover!==undefined||confirmedStopped!==undefined)throw Error('Brain recovery requires a different bound session/client');
     if (old) {
       if (old.clientId !== clientId || !token || old.tokenHash !== sha(token)) throw Error('Role already bound to another client; reuse its credential file');
-      if (sessionId && ((old.sessionId && old.sessionId !== sessionId) || (old.wake?.threadId && old.wake.threadId !== sessionId))) throw Error('Role belongs to another session');
+      if (sessionId && old.sessionId !== sessionId) throw Error('Role belongs to another session');
       if (capabilities !== undefined && JSON.stringify(caps) !== JSON.stringify(old.capabilities || [])) throw Error('Capabilities changed; detach before replacing worker configuration');
-      if (sessionId && !old.sessionId) this.store.change(s => { s.projects[p.id].bindings[key].sessionId = sessionId; });
       return { projectId: p.id, role, clientId, token, ...(role==='worker'?{workerId:validateWorkerId(workerId)}:{}) };
     }
     // Caller creates a random token before registering, so a lost response can safely retry.
@@ -81,11 +79,14 @@ class Desktop {
     });
     return { projectId: p.id, role, clientId, token, ...(role==='worker'?{workerId:validateWorkerId(workerId)}:{}) };
   }
-  authenticate(token) {
+  authenticate(token, {allowPending = false} = {}) {
     if (!token) throw Error('Missing desktop token');
     const hash = sha(token);
     for (const p of Object.values(this.store.state.projects)) for (const [key, b] of Object.entries(p.bindings || {})) {
       if (b.tokenHash === hash) return { projectId:p.id,role:['brain','reviewer'].includes(key)?key:'worker',...(['brain','reviewer'].includes(key)?{}:{workerId:key==='worker'?'default':key.slice(7)}),clientId:b.clientId };
+    }
+    if (allowPending) for (const p of Object.values(this.store.state.projects)) for (const [key,b] of Object.entries(p.handovers || {})) {
+      if (b.tokenHash === hash) return {projectId:p.id,role:['brain','reviewer'].includes(key)?key:'worker',...(['brain','reviewer'].includes(key)?{}:{workerId:key==='worker'?'default':key.slice(7)}),clientId:b.clientId,pending:true,tokenHash:hash};
     }
     throw Error('Invalid desktop token');
   }
@@ -120,12 +121,12 @@ class Desktop {
     const workerId=validateWorkerId(input.workerId);
     if(input.requiredCapability!==undefined)validateWorkerId(input.requiredCapability);
     if(!t||!['ready','blocked'].includes(t.state)||this.d.active.has(p.id))throw Error('Assignment requires ready or blocked task');
-    if(input.retry && (t.state!=='blocked'||t.resumePhase!=='worker'||this.d.needsRepairAuthorization(t)))throw Error('Assignment retry requires a blocked implementation task');
+    if(input.retry && (t.state!=='blocked'||t.resumePhase!=='worker'))throw Error('Assignment retry requires a blocked implementation task');
     if(typeof input.reason!=='string'||!input.reason.trim())throw Error('Assignment reason required');
     if(input.updatePlan && t.attempts.length)throw Error('Plan adjustment requires an unstarted task');
     this.store.change(s=>{
       const q=s.projects[p.id].tasks[t.id],previousWorkerId=q.currentWorkerId;
-      q.currentWorkerId=workerId;q.workerId=workerId;
+      q.currentWorkerId=workerId;
       if(input.requiredCapability!==undefined)q.requiredCapability=input.requiredCapability;
       if(input.updatePlan){q.plannedWorkerId=workerId;q.plannedRequiredCapability=q.requiredCapability??null;}
       this.store.event(s,'worker_assigned',{projectId:p.id,taskId:t.id,previousWorkerId,workerId,requiredCapability:q.requiredCapability,updatePlan:!!input.updatePlan,reason:input.reason});
@@ -148,18 +149,6 @@ class Desktop {
     this.d.retry(identity.projectId,input.taskId,input.confirmedStopped===true,input.restartWorker===true,input.reason.trim());
     this.d.tick();return {ok:true,state:this.store.state.projects[identity.projectId].tasks[input.taskId].state};
   }
-  configureRepair(identity,input) {
-    this.assertBinding(identity);
-    if(identity.role!=='brain')throw Error('Only brain can configure repairs');
-    this.d.configureRepair(identity.projectId,input.taskId,input.config);
-    return {ok:true,taskId:input.taskId};
-  }
-  reconcileReview(identity,input) {
-    this.assertBinding(identity);
-    if(identity.role!=='brain')throw Error('Only brain can reconcile review candidates');
-    this.d.reconcileReview(identity.projectId,input.taskId,input);
-    this.d.tick();return {ok:true,state:this.store.state.projects[identity.projectId].tasks[input.taskId].state};
-  }
   reviseTask(identity,input) {
     this.assertBinding(identity);
     if(identity.role!=='brain')throw Error('Only brain can revise task contracts');
@@ -173,11 +162,11 @@ class Desktop {
     const result=this.d.resolveTask(identity.projectId,input.taskId,input.replacementTaskId,input.reason,'brain');
     this.d.tick();return result;
   }
-  claim(identity) {
+  claim(identity, { dispatch = true } = {}) {
     // [AI-added] 2026-09-22 09:20: Never redeliver a run whose receipt is awaiting durable settlement.
     if(this.d.pendingSettlements.size)return null;
     this.assertBinding(identity);
-    this.d.tick();
+    if (dispatch) this.d.tick();
     if(this.d.pendingSettlements.size)return null;
     const p = this.store.state.projects[identity.projectId];
     if (p.paused || p.completedAt || require('./startup.cjs').waiting(p)) return null;
@@ -198,10 +187,9 @@ class Desktop {
       const current=this.store.state.projects[p.id];
       // [AI-added] 2026-09-14 22:53
       const withParkHint=job=>current.bindings?.brain?.wake
-        ? {...job,prompt:job.prompt+'\n\n自动唤醒后续步骤：实际调用终端工具执行本待办要求的 '+(job.kind==='planning'?(current.goals?'stage-register（提交完整计划）、finish-goal（完成当前目标）或 closeout（记录具体阻塞）':'stage-register（提交完整计划）或 closeout（记录具体阻塞）'):'closeout 或 scope-ack')+'，成功后必须使用本会话已有客户端、credential 和 data 路径实际执行 park。不得只展示命令。park 返回 job 时继续处理；返回 parked:true 时结束当前回合，不调用 wait 或轮询。返回 completed:true 时结束回合。若操作失败或缺少权限，说明具体阻塞，不声称已挂起。'}
+        ? {...job,prompt:job.prompt+'\n\n自动唤醒后续步骤：实际调用终端工具执行本待办要求的 '+(job.kind==='planning'?(current.goals?'stage-register（提交完整计划）、finish-goal（完成当前目标）或 closeout（记录具体阻塞）':'stage-register（提交完整计划）或 closeout（记录具体阻塞）'):job.kind==='task_attention'?'实际解决阻塞后 attention-ack；确需用户决定时 attention-ack --wait-reason <具体等待事项>':'scope-ack')+'，成功后必须使用本会话已有客户端、credential 和 data 路径实际执行 park。不得只展示命令。park 返回 job 时继续处理；返回 parked:true 时结束当前回合，不调用 wait 或轮询。返回 completed:true 时结束回合。若操作失败或缺少权限，说明具体阻塞，不声称已挂起。'}
         : job;
       const scope=require('./scope-recovery.cjs').job(current);
-      // Previous implementation: if(scope)return scope;
       // [AI-added] 2026-09-14 22:53
       if(scope){require('./brain-activities.cjs').autoStart(this,identity,'troubleshooting','scope:'+scope.alertId);return withParkHint(scope);}
       // [AI-added] 2026-09-19: Attention bypasses the in-flight gate; a task that is itself
@@ -213,7 +201,6 @@ class Desktop {
       if(planning){
         require('./brain-activities.cjs').autoStart(this,identity,'planning','planning:'+planning.planningId);
         if(current.bindings.brain.armed)this.store.change(s=>{const b=s.projects[p.id].bindings.brain;b.armed=false;delete b.armedAt;});
-        // Previous implementation: return planning;
         // [AI-added] 2026-09-14 22:53
         return withParkHint(planning);
       }
@@ -242,10 +229,10 @@ class Desktop {
       startup:require('./startup.cjs').status(p),
       workers:Object.entries(p.bindings||{}).filter(([k])=>!['brain','reviewer'].includes(k)).map(([key,b])=>({workerId:key==='worker'?'default':key.slice(7),sessionId:b.sessionId,capabilities:b.capabilities||[]})),
       reviewerOnline:require('./pre-review.cjs').online(this.d,p),
-      connections:Object.entries(p.bindings||{}).map(([key,b])=>({binding:key,sessionId:b.sessionId,wakeEnabled:!!b.wake,provider:b.wake?.provider||b.provider||b.continuation?.provider||null,continuationError:b.continuationError||null,armed:!!b.armed,armedAt:b.armedAt||null,wakeState:b.armed?'standby_authorized':b.wake?'not_parked':'unconfigured'})),
+      connections:Object.entries(p.bindings||{}).map(([key,b])=>({binding:key,sessionId:b.sessionId,wakeEnabled:!!b.wake,provider:b.provider||null,continuationError:b.continuationError||null,armed:!!b.armed,armedAt:b.armedAt||null,wakeState:b.armed?'standby_authorized':b.wake?'not_parked':'unconfigured'})),
       boundRoles: Object.keys(p.bindings || {}),
-      tasks: Object.values(p.tasks).map(t => ({ id: t.id, goalId: t.goalId, title: t.title, state: t.state, dependsOn: t.dependsOn || [], supersedes:t.supersedes||[],resolution:t.resolution||null,contractRevision:t.contractRevision||1,stageId:t.stageId,roundId:t.roundId,stageHeld:!!t.stageHeld,
-        error: t.error || null, scopeReturns:t.scopeReturns||0,scopeRecoveryRequested:!!t.scopeRecoveryRequested,scopeRecoveryPaths:t.scopeRecovery?.targets.map(x=>x.path),scopeAlert:t.scopeAlert||null, attention:t.attention||null, workerId:t.workerId||'default',plannedWorkerId:t.plannedWorkerId,currentWorkerId:t.currentWorkerId,plannedRequiredCapability:t.plannedRequiredCapability,attemptCounts:attempts.counts(t),maxAttempts:t.maxAttempts,budgetExhausted:attempts.exhausted(t),requiredCapability:t.requiredCapability,waitingForWorker:t.state==='ready'&&!matches(p,t) })) };
+      tasks: Object.values(p.tasks).map(t => ({ id: t.id, goalId: t.goalId, title: t.title, state: t.state, dependsOn: t.dependsOn || [], supersedes:t.supersedes||[],resolution:t.resolution||null,contractRevision:t.contractRevision,stageId:t.stageId,roundId:t.roundId,stageHeld:!!t.stageHeld,
+        error: t.error || null, scopeReturns:t.scopeReturns||0,scopeRecoveryPaths:t.scopeRecovery?.targets.map(x=>x.path),scopeAlert:t.scopeAlert||null, attention:t.attention||null, plannedWorkerId:t.plannedWorkerId,currentWorkerId:t.currentWorkerId,plannedRequiredCapability:t.plannedRequiredCapability,attemptCounts:attempts.counts(t),maxAttempts:t.maxAttempts,budgetExhausted:attempts.exhausted(t),requiredCapability:t.requiredCapability,waitingForWorker:t.state==='ready'&&!matches(p,t) })) };
   }
   finishProject(identity) {
     this.assertBinding(identity);
@@ -261,10 +248,12 @@ class Desktop {
     // [AI-added] 2026-09-22 09:20: A saved receipt is not yet an accepted settlement.
     if(this.d.pendingSettlements.size)return {nextAction:'attention',nextInstruction:'回执结算遇到存储错误，服务已暂停派发并有界恢复；查看 status.storageRecovery，不要重新执行任务或创建新 attempt。'};
     if(p.completedAt)return {completed:true,nextAction:'stop',nextInstruction:'整个项目已结束，结束回合，不再 wait/park。'};
+    const binding = p.bindings?.[bindingKey(identity)];
+    if(p.paused && !binding?.wake && binding?.provider && require('./platforms.cjs').continuationMode(binding.provider)==='wait') return {...require('./wait-policy.cjs').step(),paused:true};
     if(p.paused || ['blocked','uncertain'].includes(task?.state) || (['ready','review_ready'].includes(task?.state) && attempts.exhausted(task)))return {nextAction:'attention',nextInstruction:'项目暂停、任务阻塞或尝试额度耗尽。报告实际原因，不声称已完成，不循环重试。'};
     if(identity.role==='brain' && p.planning?.state==='pending')return {nextAction:'claim',nextInstruction:p.goals?'实际调用 claim 领取当前目标的规划或收尾；达到验收要求后 finish-goal --goal <当前目标 ID> --summary <验收摘要>，不要结束整个项目。':'实际调用 claim 领取阶段收尾待办并处理；全部任务已通过则按已有授权调用管理端结束项目，不能虚构下一任务。'};
     if(p.bindings?.[bindingKey(identity)]?.wake)return {nextAction:'park',nextInstruction:'实际调用 park。返回 job 继续处理；只有 parked:true 或 completed:true 才结束回合。不要 wait，不把 submit 成功当作已挂起。'};
-    return {nextAction:'wait',nextInstruction:'本端未启用唤醒。持续协作期间提交后实际调用 wait --seconds 60，宿主超时至少留出额外 30 秒；有进程会话 ID 就续等同一进程。idle:true 不是完成，按授权续等；completed:true 才结束。不能只说等待后直接结束，也不能重复启动 wait。'};
+    return require('./wait-policy.cjs').step();
   }
   // [AI-added] 2026-09-22 09:20: Advisory read only; submission always validates the current tree again.
   preflight(identity,{taskId,attemptId}){
@@ -277,7 +266,7 @@ class Desktop {
     const outside=r.role==='worker'?changed.filter(c=>{
       const target=r.scopeRecovery?.targets.find(x=>x.path===c.path);
       if(target&&same(after[c.path],target.expected))return false;
-      return !(r.scopePolicy==='separated-v1'?require('./scope-recovery.cjs').writable(c.path,t.allowedPaths,t.id):allowed(c.path,t.allowedPaths));
+      return !require('./scope-recovery.cjs').writable(c.path,t.allowedPaths,t.id);
     }):changed;
     const unresolved=(r.scopeRecovery?.targets||[]).filter(x=>!ignored(x.path,r.snapshotPolicy)&&!same(after[x.path],x.expected)).map(x=>x.path);
     const reserved=reservedNames(after);
@@ -307,7 +296,7 @@ class Desktop {
     }else{
       receipt={attemptId,role:r.role,text,usage:normalizedUsage};
       if(r.role==='worker')receipt.artifactId=this.d.createSnapshot(p.workspace,r.snapshotPolicy).id;
-      else {receipt.reviewChanges=changes(r.delivery.reviewManifest,manifest(r.delivery.cwd,r.reviewPolicy));receipt.reviewChanged=receipt.reviewChanges.length>0;}
+      else {receipt.reviewChanges=changes(r.delivery.reviewManifest,manifest(r.delivery.cwd,r.reviewPolicy));}
       atomic(receiptFile,receipt);
     }
     if(!this.d.pendingSettlements.has(r.id))this.d.settle(p.id,t.id,r.id,receipt);
@@ -344,8 +333,9 @@ class Desktop {
     const p = this.store.state.projects[identity.projectId];
     if (p.goals) return require('./project-setup.cjs').configureTeam(this, p.id, input.staffing?.workers);
     const staffing=require('./bindings.cjs').staffing(input.staffing);
+    if(JSON.stringify(p.staffing)===JSON.stringify(staffing))return {ok:true,duplicate:true,workspace:p.workspace,staffing};
     this.store.change(s=>{s.projects[identity.projectId].staffing=staffing;this.store.event(s,'staffing_assessed',{projectId:identity.projectId,...staffing});});
-    return {ok:true,staffing};
+    return {ok:true,workspace:p.workspace,staffing};
   }
   progress(identity, v) {
     const r = this.store.state.projects[identity.projectId]?.tasks[v.taskId]?.attempts.at(-1);

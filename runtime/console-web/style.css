@@ -603,6 +603,8 @@ td small { display: block; color: var(--muted-2); font-size: 10px; margin-top: 5
 #setup-advanced { margin: 16px 0; }
 #setup-advanced > summary { cursor: pointer; font-size: 13px; padding: 10px 0; }
 #setup-advanced .panel-heading { padding: 12px 0; }
+.project-controls { padding: 20px 22px; margin-bottom: 20px; }
+.project-controls > .subtle { margin: 12px 0 0; }
 .team-panel { margin-bottom: 20px; }
 .goals-panel { margin-bottom: 20px; }
 .goal-list { display: grid; gap: 12px; padding: 16px 22px; }
@@ -647,7 +649,7 @@ dialog label input:not([type=checkbox]), dialog label select {
 }
 form .check { display: flex; gap: 8px; align-items: center; font-size: 11px; }
 .impact { background: var(--impact-bg); padding: 12px; font-size: 12px; color: var(--impact-ink); }
-#lifecycle-preview { margin-bottom: 4px; font-size: 11px; }
+.command-preview-list { max-height: 220px; overflow-y: auto; padding-left: 20px; overflow-wrap: anywhere; font-size: 12px; line-height: 1.8; }
 .dialog-actions { text-align: right; }
 /* [AI-added] 2026-09-19: copyable rebind invitation popup. */
 #invitation-text {

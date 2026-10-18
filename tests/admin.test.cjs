@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { serve } = require('../runtime/server.cjs');
+const { serve } = require('./service-fixture.cjs');
 const { atomic } = require('../runtime/core/storage.cjs');
 const { Monitor } = require('../runtime/core/monitor.cjs');
 const lifecycle = require('../runtime/core/lifecycle.cjs');
@@ -13,14 +13,14 @@ async function fixture(t, options = {}) {
   const base = path.resolve('tmp/admin-console/tests'); fs.mkdirSync(base, { recursive: true });
   const temp = fs.mkdtempSync(path.join(base, 'case-')), root = path.join(temp, 'data'), workspace = path.join(temp, 'work');
   fs.mkdirSync(workspace); fs.mkdirSync(root);
-  atomic(path.join(root, 'config.json'), { version: 1, enableRealCalls: false, maxConcurrent: 1, profiles: { codex: { adapter: 'codex', command: process.execPath, args: [] } } });
+  atomic(path.join(root, 'config.json'), { version: 1, maxConcurrent: 1 });
   const s = await serve(root, options); t.after(() => s.close());
   const url = 'http://127.0.0.1:' + s.server.address().port, token = fs.readFileSync(path.join(root, 'admin-token'), 'utf8');
   s.dispatcher.addProject({ id: 'project', workspace, mode: 'desktop' });
   const request = (route, opts) => fetch(url + route, opts);
   async function login() {
     const ticket = await (await request('/admin/ticket', { method: 'POST', headers: { Authorization: 'Bearer ' + token } })).json();
-    const value = new URL(ticket.url).hash.slice(8);
+    const value = ticket.ticket;
     const response = await request('/admin/login', { method: 'POST', headers: { Origin: url }, body: JSON.stringify({ ticket: value }) });
     assert.equal(response.status, 200);
     const cookie = response.headers.get('set-cookie').split(';')[0], { csrf } = await response.json();
@@ -32,6 +32,30 @@ async function fixture(t, options = {}) {
 function lifecycleCommand(f, extra) {
   return f.s.admin.command({commandId:crypto.randomUUID(),instanceId:f.s.monitor.instanceId,revision:f.s.store.state.revision,projectId:'project',confirmed:true,reason:'隔离功能验证',...extra});
 }
+
+test('simplified browser payloads retain lifecycle audit, exact scope and stopped-execution guards', async t => {
+  const f = await fixture(t), { buildCommand } = await import('../runtime/console-web/command-policy.mjs');
+  f.s.store.change(s => {
+    const p = s.projects.project; p.paused = true;
+    for (const [id, dependsOn] of [['A', []], ['B', ['A']], ['Z', []]]) p.tasks[id] = {
+      id, title: id, instructions: '实现', acceptance: '验证', allowedPaths: ['x'], dependsOn,
+      state: 'accepted', attempts: [], ...require('../runtime/core/attempts.cjs').taskFields()
+    };
+  });
+  const target = { projectId: 'project', taskId: 'A' };
+  const view = lifecycle.preview(f.s.store.state.projects.project, { action: 'reset-task', taskId: 'A' });
+  assert.equal(view.requiresStopped, false);
+  const command = buildCommand(f.s.admin.overview(), target, 'reset-task', { preview: view });
+  const result = await f.s.admin.command(command); assert.equal(result.ok, true);
+  assert.deepEqual(result.affectedTasks, ['A', 'B']); assert.equal(f.s.store.state.projects.project.tasks.Z.state, 'accepted');
+  const history = JSON.parse(fs.readFileSync(path.join(f.root, 'task-resets', result.resetId + '.json'), 'utf8'));
+  assert.equal(history.reason, 'Web 控制台：重置任务');
+  f.s.store.change(s => { s.projects.project.tasks.A.state = 'uncertain'; });
+  const risky = lifecycle.preview(f.s.store.state.projects.project, { action: 'reset-task', taskId: 'A' });
+  assert.equal(risky.requiresStopped, true);
+  assert.equal((await f.s.admin.command(buildCommand(f.s.admin.overview(), target, 'reset-task', { preview: view }))).ok, false);
+  assert.equal((await f.s.admin.command(buildCommand(f.s.admin.overview(), target, 'reset-task', { preview: risky }))).ok, true);
+});
 test('service diagnostics include version, process identity and structured lifecycle logs',async t=>{
   const records=[],f=await fixture(t,{logger:value=>records.push(value)}),snapshot=f.s.monitor.snapshot();
   assert.equal(snapshot.runtimeVersion,require('../package.json').version);assert.equal(snapshot.pid,process.pid);assert.match(snapshot.instanceId,/^[a-f0-9-]{36}$/);
@@ -68,25 +92,26 @@ test('reset clears runtime state, invalidates old submissions, preserves definit
   const f=await fixture(t), desktop=f.s.admin.desktop;
   const client=desktop.attach({workspace:f.workspace,role:'worker',clientId:'worker-client',token:crypto.randomBytes(32).toString('hex')});
   f.s.store.change(s=>{const p=s.projects.project;p.startup={state:'started'};p.paused=true;p.completedAt='old';p.turns=9;
-    p.tasks.T={id:'T',title:'Keep definition',instructions:'write x',acceptance:'correct',allowedPaths:['x.txt'],dependsOn:[],state:'accepted',attempts:[{id:'old-run',role:'worker',claimedBy:client.clientId,settled:true}],maxAttempts:90,repairs:2,sessions:{worker:{id:'old-session'}},artifactId:'old-artifact',preReview:{verdict:'pass'},scopeRecovery:{old:true},wakeNotice:{status:'sent'}};
+    p.tasks.T={id:'T',title:'Keep definition',instructions:'write x',acceptance:'correct',allowedPaths:['x.txt'],dependsOn:[],state:'accepted',attempts:[{id:'old-run',contractRevision:3,role:'worker',claimedBy:client.clientId,settled:true}],...require('../runtime/core/attempts.cjs').taskFields({maxAttempts:90}),contractRevision:3,repairs:2,sessions:{worker:{id:'old-session'}},artifactId:'old-artifact',preReview:{verdict:'pass'},scopeRecovery:{old:true},wakeNotice:{status:'sent'}};
     p.planning={id:'old-plan',state:'pending',acceptedTaskIds:['T']};p.planningHistory=[{id:'older',acceptedTaskIds:['T']}];});
   const result=await lifecycleCommand(f,{action:'reset-task',taskId:'T',confirmText:'T'});assert.equal(result.ok,true);
   const p=f.s.store.state.projects.project,task=p.tasks.T;
-  assert.equal(task.state,'ready');assert.deepEqual(task.attempts,[]);assert.deepEqual(task.sessions,{});assert.equal(task.maxAttempts,30);assert.equal(task.repairs,0);
+  assert.equal(task.state,'ready');assert.deepEqual(task.attempts,[]);assert.deepEqual(task.sessions,{});assert.equal(task.maxAttempts,30);assert.equal(task.contractRevision,3);assert.equal(task.repairs,0);
+  assert.equal(task.plannedWorkerId,'default');assert.equal(task.currentWorkerId,'default');assert.equal(Object.hasOwn(task,'workerId'),false);
   for(const k of ['artifactId','preReview','scopeRecovery','wakeNotice'])assert.equal(task[k],undefined);
   assert.equal(task.title,'Keep definition');assert.equal(p.paused,true);assert.equal(p.completedAt,undefined);assert.equal(p.turns,9);assert.equal(p.planning,undefined);assert.deepEqual(p.planningHistory,[]);
   assert.throws(()=>desktop.submit(client,{taskId:'T',attemptId:'old-run',result:{}}),/identity mismatch/);
   const history=JSON.parse(fs.readFileSync(path.join(f.root,'task-resets',result.resetId+'.json'),'utf8'));assert.equal(history.tasks[0].attempts[0].id,'old-run');
 });
 test('reset requires explicit cascade for processed descendants and previews all affected tasks',async t=>{
-  const f=await fixture(t);f.s.store.change(s=>{const p=s.projects.project;p.paused=true;for(const [id,dep]of [['A',[]],['B',['A']],['C',['B']],['Z',[]]])p.tasks[id]={id,title:id,instructions:'i',acceptance:'a',allowedPaths:['x'],dependsOn:dep,state:'accepted',attempts:[],maxAttempts:30};});
+  const f=await fixture(t);f.s.store.change(s=>{const p=s.projects.project;p.paused=true;for(const [id,dep]of [['A',[]],['B',['A']],['C',['B']],['Z',[]]])p.tasks[id]={id,title:id,instructions:'i',acceptance:'a',allowedPaths:['x'],dependsOn:dep,state:'accepted',attempts:[],...require('../runtime/core/attempts.cjs').taskFields()};});
   const view=lifecycle.preview(f.s.store.state.projects.project,{action:'reset-task',taskId:'A'});assert.deepEqual(view.affectedTasks.map(t=>t.id),['A','B','C']);
   assert.equal((await lifecycleCommand(f,{action:'reset-task',taskId:'A',confirmText:'A'})).ok,false);
   assert.equal((await lifecycleCommand(f,{action:'reset-task',taskId:'A',confirmText:'A',resetDependents:true})).ok,true);
   for(const id of ['A','B','C'])assert.equal(f.s.store.state.projects.project.tasks[id].state,'ready');assert.equal(f.s.store.state.projects.project.tasks.Z.state,'accepted');
 });
 test('live processing and unconfirmed in-flight tasks cannot be deleted or reset',async t=>{
-  const f=await fixture(t);f.s.store.change(s=>{s.projects.project.tasks.T={id:'T',title:'T',state:'running',attempts:[{id:'old',role:'worker',settled:false}],maxAttempts:30};});
+  const f=await fixture(t);f.s.store.change(s=>{s.projects.project.tasks.T={id:'T',title:'T',state:'running',attempts:[{id:'old',contractRevision:1,role:'worker',settled:false}],...require('../runtime/core/attempts.cjs').taskFields()};});
   assert.equal((await lifecycleCommand(f,{action:'archive-project'})).ok,false);
   assert.equal((await lifecycleCommand(f,{action:'reset-task',taskId:'T',confirmText:'T'})).ok,false);
   f.s.dispatcher.active.set('project',{});
@@ -100,32 +125,42 @@ test('browser login is one-time, same-origin, CSRF protected and snapshot exclud
   assert.equal((await f.request('/admin/', { headers: { Origin: 'https://evil.example' } })).status, 403);
   const { headers, value } = await f.login();
   assert.equal((await f.request('/admin/login', { method: 'POST', headers: { Origin: f.url }, body: JSON.stringify({ ticket: value }) })).status, 401);
-  f.s.store.change(state => { state.projects.project.bindings = { brain: { clientId: 'brain-client', tokenHash: 'never-export-this', sessionId: 'session1', wake: { provider: 'codex', token: 'never-export-this' } } }; });
+  f.s.store.change(state => { state.projects.project.bindings = { brain: { clientId: 'brain-client', provider:'codex', tokenHash: 'never-export-this', sessionId: 'session1', wake: { provider: 'codex', threadId:'session1', turnId:'fixture-turn', token: 'never-export-this' } } }; });
   const r = await f.request('/admin/api/overview', { headers }); const text = await r.text();
   assert.equal(r.status, 200); assert.ok(!text.includes('never-export-this')); assert.ok(!text.includes(f.token));
   assert.equal((await f.request('/admin/api/commands', { method: 'POST', headers: { Cookie: headers.Cookie, Origin: f.url }, body: '{}' })).status, 403);
   assert.equal((await f.request('/status', { headers: { Authorization: 'Bearer ' + f.token, Origin: f.url } })).status, 403);
 });
 // [AI-added] 2026-09-17 13:54
-test('web console opens a catalog project on its own service without workspace input', async t => {
-  const f = await fixture(t), temp = fs.mkdtempSync(path.join(path.resolve('tmp/admin-console/tests'), 'target-')), root = path.join(temp, 'data'), workspace = path.join(temp, 'work');
-  fs.mkdirSync(root); fs.mkdirSync(workspace); t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
-  atomic(path.join(root, 'config.json'), { version: 1, enableRealCalls: false, maxConcurrent: 1, profiles: { codex: { adapter: 'codex', command: process.execPath, args: [] } } });
-  const target = await serve(root); t.after(() => target.close()); target.dispatcher.addProject({ id: 'catalog-project', workspace, mode: 'desktop' });
-  const original = f.s.admin.overview.bind(f.s.admin); f.s.admin.overview = () => ({ ...original(), projects: [{ id: 'catalog-project', workspace, service: { dataRoot: root, online: true } }] });
-  const opened = await f.s.admin.openProject('catalog-project'); assert.equal(opened.current, false); assert.match(opened.url, new RegExp(`^http://127\\.0\\.0\\.1:${target.server.address().port}/admin/#ticket=`));
-  const ticket = new URL(opened.url).hash.slice(8), targetUrl = `http://127.0.0.1:${target.server.address().port}`;
-  const login = await fetch(targetUrl + '/admin/login', { method: 'POST', headers: { Origin: targetUrl }, body: JSON.stringify({ ticket }) }); assert.equal(login.status, 200);
+test('retired admin pages and cross-port navigation return 404',async t=>{
+ const f=await fixture(t);const {headers}=await f.login();
+ for(const route of ['/admin','/admin/','/admin/app.js','/admin/style.css'])assert.equal((await f.request(route)).status,404);
+ assert.equal((await f.request('/admin/api/open-project',{method:'POST',headers,body:'{}'})).status,404);
 });
 test('command receipts prevent duplicate mutations and stale revisions cannot control projects', async t => {
   const f = await fixture(t), { headers } = await f.login();
-  const v = { commandId: crypto.randomUUID(), instanceId: f.s.monitor.instanceId, revision: f.s.store.state.revision, projectId: 'project', action: 'pause' };
+  const v = { commandId: crypto.randomUUID(), instanceId: f.s.monitor.instanceId, revision: f.s.store.state.revision, projectId: 'project', action: 'pause', confirmed: true };
   const send = async body => (await f.request('/admin/api/commands', { method: 'POST', headers, body: JSON.stringify(body) })).json();
   assert.equal((await send(v)).ok, true); const revision = f.s.store.state.revision;
   assert.equal((await send(v)).duplicate, true); assert.equal(f.s.store.state.revision, revision);
   assert.match((await send({ ...v, commandId: crypto.randomUUID(), action: 'resume' })).error, /状态已变化/);
   assert.match((await send({ ...v, action: 'resume' })).error, /不同参数/);
   const persisted = JSON.parse(fs.readFileSync(path.join(f.root, 'monitor/commands.json'), 'utf8')); assert.equal(persisted[v.commandId].state, 'completed');
+});
+
+test('foreground mutations require confirmation before any state or receipt changes', async t => {
+  const f = await fixture(t), { headers } = await f.login();
+  const before = structuredClone(f.s.store.state);
+  for (const action of ['pause', 'resume', 'assign', 'task-budget', 'configure-team', 'cancel-goal', 'reopen-project', 'detach', 'rebind-invite', 'rebind-cancel', 'wake-retry', 'wake-remind', 'finish-project', 'stop']) {
+    const response = await f.request('/admin/api/commands', { method: 'POST', headers, body: JSON.stringify({
+      commandId: crypto.randomUUID(), instanceId: f.s.monitor.instanceId, revision: before.revision, projectId: 'project', action
+    }) });
+    assert.equal(response.status, 400, action);
+    assert.match((await response.json()).error, /必须确认/, action);
+  }
+  assert.deepEqual(f.s.store.state, before);
+  assert.equal(f.s.admin.commands.size, 0);
+  assert.ok(f.s.admin.overview().projects[0].team, 'unmanaged projects also expose readiness and member controls');
 });
 test('SSE replays missed events and resets expired or previous-instance cursors', async t => {
   const f = await fixture(t), { headers } = await f.login();
@@ -142,7 +177,7 @@ test('SSE replays missed events and resets expired or previous-instance cursors'
 });
 test('Qoder armed is separate from direct bridge reachability and claim', async t => {
   const f = await fixture(t), sid = 'qoder-test-session';
-  const binding = { clientId: 'qoder-client', sessionId: sid, armed: true, wake: { provider: 'qoder', threadId: sid, workspace: f.workspace }, tokenHash: 'private' };
+  const binding = { clientId: 'qoder-client', provider:'qoder', sessionId: sid, armed: true, wake: { provider: 'qoder', threadId: sid, workspace: f.workspace }, tokenHash: 'private' };
   f.s.store.change(state => { state.projects.project.bindings = { reviewer: binding }; });
   const original = f.s.monitor.wake.forProvider.bind(f.s.monitor.wake);
   f.s.monitor.wake.forProvider = provider => provider === 'qoder' ? { read: async value => ({ thread: { id: value.threadId, cwd: value.workspace, reachable: true, status: { type: 'idle' } }, turns: [] }) } : original(provider);
@@ -155,7 +190,7 @@ test('Qoder armed is separate from direct bridge reachability and claim', async 
 });
 test('a snapshot larger than the socket high-water mark keeps the event stream open', async t => {
   const f=await fixture(t),{headers}=await f.login();
-  f.s.store.change(s=>{for(let i=0;i<80;i++)s.projects.project.tasks['T'+i]={id:'T'+i,title:'大型快照'.repeat(80),state:'accepted',attempts:[],maxAttempts:30};});
+  f.s.store.change(s=>{for(let i=0;i<80;i++)s.projects.project.tasks['T'+i]={id:'T'+i,title:'大型快照'.repeat(80),state:'accepted',attempts:[],...require('../runtime/core/attempts.cjs').taskFields()};});
   const controller=new AbortController();t.after(()=>controller.abort());
   const r=await f.request(`/admin/api/stream?cursor=${f.s.monitor.sequence}&instanceId=${f.s.monitor.instanceId}`,{headers,signal:controller.signal});
   const reader=r.body.getReader(),decoder=new TextDecoder();let text='';
@@ -168,7 +203,7 @@ test('late host results cannot contaminate a replaced connection', async t => {
   let release; const waiting = new Promise(resolve => { release = resolve; });
   const adapter = { read: () => waiting };
   const f = await fixture(t, { wakeAdapter: { forProvider: () => adapter } });
-  const b = { clientId: 'old-client', wake: { provider: 'qoder', threadId: 'session-old' } };
+  const b = { clientId: 'old-client', provider:'qoder', sessionId:'session-old', wake: { provider: 'qoder', threadId: 'session-old', workspace:f.workspace } };
   f.s.store.change(state => { state.projects.project.bindings = { worker: b }; });
   const pending = f.s.monitor.probe(f.s.store.state.projects.project, 'worker', b);
   f.s.store.change(state => { state.projects.project.bindings.worker = { clientId: 'new-client' }; });
@@ -198,7 +233,7 @@ test('operator detach preserves an unfinished worker and uncertain wake is never
   let sends = 0;
   const f = await fixture(t, { wakeAdapter: { forProvider: () => ({ send: async () => { sends++; } }) } });
   f.s.store.change(s => { const p=s.projects.project; p.paused=true;p.bindings={worker:{clientId:'worker-client'}};
-    p.tasks.T={id:'T',title:'test',state:'running',maxAttempts:30,attempts:[{id:'run',role:'worker',workerId:'default',settled:false,wakeNotice:{status:'uncertain'}}]}; });
+    p.tasks.T={id:'T',title:'test',state:'running',...require('../runtime/core/attempts.cjs').taskFields(),attempts:[{id:'run',contractRevision:1,role:'worker',workerId:'default',settled:false,wakeNotice:{status:'uncertain'}}]}; });
   const command = extra => f.s.admin.command({commandId:crypto.randomUUID(),instanceId:f.s.monitor.instanceId,revision:f.s.store.state.revision,projectId:'project',confirmed:true,...extra});
   assert.match((await command({action:'detach',binding:'worker',clientId:'worker-client'})).error,/unfinished/);
   assert.ok(f.s.store.state.projects.project.bindings.worker);
@@ -207,7 +242,7 @@ test('operator detach preserves an unfinished worker and uncertain wake is never
 // [AI-added] 2026-09-17 18:47: Operator recovery may authorize one reminder without forging a claim.
 test('operator reminder arms only the current unclaimed attempt and surfaces stalled evidence',async t=>{
  const f=await fixture(t,{wakeAdapter:{forProvider:()=>({read:async()=>({thread:{status:{type:'active'}},turns:[]}),send:async()=>{throw Error('must remain idle');}})}});
- f.s.store.change(s=>{const p=s.projects.project;p.bindings={worker:{clientId:'worker-client',wake:{provider:'codex',threadId:'thread',turnId:'turn'}}};p.tasks.T={id:'T',title:'T',state:'running',maxAttempts:30,attempts:[{id:'run',role:'worker',workerId:'default',settled:false,delivery:{cwd:f.workspace,prompt:'work'},wakeNotice:{status:'sent',at:new Date(Date.now()-120000).toISOString(),claimStatus:'stalled'}}]};});
+ f.s.store.change(s=>{const p=s.projects.project;p.bindings={worker:{clientId:'worker-client',provider:'codex',sessionId:'thread',wake:{provider:'codex',threadId:'thread',turnId:'turn'}}};p.tasks.T={id:'T',title:'T',state:'running',...require('../runtime/core/attempts.cjs').taskFields(),attempts:[{id:'run',contractRevision:1,role:'worker',workerId:'default',settled:false,delivery:{cwd:f.workspace,prompt:'work'},wakeNotice:{status:'sent',at:new Date(Date.now()-120000).toISOString(),claimStatus:'stalled'}}]};});
  const result=await lifecycleCommand(f,{action:'wake-remind',taskId:'T',attemptId:'run',reason:'执行员未领取，人工复核后再次提醒'});assert.equal(result.ok,true);
  const p=f.s.store.state.projects.project,a=p.tasks.T.attempts[0];assert.equal(p.bindings.worker.armed,true);assert.equal(a.claimedBy,undefined);assert.equal(a.wakeNotice.manualReminder.status,'pending');assert.equal(a.wakeNotice.claimStatus,'manual_requested');
  const snap=f.s.monitor.snapshot().projects[0];assert.ok(snap.alerts.some(x=>x.taskId==='T'&&['unclaimed','claim_stalled'].includes(x.code)));
@@ -215,9 +250,9 @@ test('operator reminder arms only the current unclaimed attempt and surfaces sta
 });
 
 // [AI-added] 2026-09-17 18:47: The home page owns routine controls and the reviewer topology stage.
-test('web console exposes contextual recovery controls and ordered reviewer topology',()=>{
- const html=fs.readFileSync(path.resolve('runtime/web/index.html'),'utf8'),app=fs.readFileSync(path.resolve('runtime/web/app.js'),'utf8');
- assert.match(html,/id="quick-controls"/);assert.match(html,/value="wake-remind"/);assert.match(app,/renderQuickControls/);assert.match(app,/brainNodes.*reviewerNodes.*workerNodes/);assert.match(app,/brainNodes,node\('span','⇄','arrow'\),reviewerNodes/);
+test('unified console exposes contextual controls and reviewer topology',()=>{
+ const html=fs.readFileSync(path.resolve('runtime/console-web/index.html'),'utf8'),app=fs.readFileSync(path.resolve('runtime/console-web/app.js'),'utf8');
+ assert.match(app,/'wake-remind'|"wake-remind"/);assert.match(html,/id="command-dialog"/);assert.match(app,/brainNodes.*reviewerNodes.*workerNodes/);
 });
 // [AI-added] 2026-09-17 11:46
 test('management rebind invitation atomically replaces a stopped session and is idempotent',async t=>{
@@ -225,7 +260,7 @@ test('management rebind invitation atomically replaces a stopped session and is 
  const old=desktop.attach({workspace:f.workspace,role:'brain',clientId:'brain-old',token:oldToken,sessionId:'session-old'});
  const invitation=await lifecycleCommand(f,{action:'rebind-invite',binding:'brain',clientId:old.clientId,confirmedStopped:true});
  assert.equal(invitation.ok,true);assert.equal(invitation.managedRebind,true);assert.match(invitation.text,/--managed-rebind/);
- assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','opencode','any']);assert.equal(invitation.provider,'any');
+ assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','codearts','opencode','dsh','any']);assert.equal(invitation.provider,'any');
  const next={workspace:f.workspace,role:'brain',clientId:'brain-new',token:crypto.randomBytes(32).toString('hex'),sessionId:'session-new',replaceClientId:old.clientId,recover:true,confirmedStopped:true,managedRebind:true,rebindInvitationId:invitation.invitationId};
  const attached=desktop.attach(next);assert.equal(attached.recovered,true);assert.throws(()=>desktop.authenticate(oldToken),/Invalid/);
  assert.equal(f.s.store.state.projects.project.rebindInvitations[invitation.invitationId].status,'completed');
@@ -235,7 +270,7 @@ test('management rebind invitation atomically replaces a stopped session and is 
 test('confirmed managed worker rebind transfers attempt and scope-recovery ownership',async t=>{
  const f=await fixture(t),desktop=f.s.admin.desktop,token=crypto.randomBytes(32).toString('hex');
  const old=desktop.attach({workspace:f.workspace,role:'worker',workerId:'strong',capabilities:['strong'],clientId:'worker-old',token,sessionId:'worker-session-old'});
- f.s.store.change(s=>{s.projects.project.tasks.T={id:'T',title:'T',state:'running',attempts:[{id:'attempt',role:'worker',workerId:'strong',claimedBy:old.clientId,settled:false}],scopeRecovery:{workerId:'strong',clientId:old.clientId},maxAttempts:30};});
+ f.s.store.change(s=>{s.projects.project.tasks.T={id:'T',title:'T',state:'running',attempts:[{id:'attempt',contractRevision:1,role:'worker',workerId:'strong',claimedBy:old.clientId,settled:false}],scopeRecovery:{workerId:'strong',clientId:old.clientId},...require('../runtime/core/attempts.cjs').taskFields()};});
  const invitation=await lifecycleCommand(f,{action:'rebind-invite',binding:'worker:strong',clientId:old.clientId,confirmedStopped:true});
  const next=desktop.attach({workspace:f.workspace,role:'worker',workerId:'strong',capabilities:['strong'],clientId:'worker-new',token:crypto.randomBytes(32).toString('hex'),sessionId:'worker-session-new',replaceClientId:old.clientId,recover:true,confirmedStopped:true,managedRebind:true,rebindInvitationId:invitation.invitationId});
  assert.equal(next.recovered,true);const task=f.s.store.state.projects.project.tasks.T;assert.equal(task.attempts[0].claimedBy,'worker-new');assert.equal(task.scopeRecovery.clientId,'worker-new');assert.throws(()=>desktop.authenticate(token),/Invalid/);
@@ -245,20 +280,20 @@ test('confirmed managed worker rebind transfers attempt and scope-recovery owner
 test('rebind invitation emits one adapted prompt per host and defaults to the bound platform',async t=>{
  const f=await fixture(t),desktop=f.s.admin.desktop;
  const old=desktop.attach({workspace:f.workspace,role:'worker',workerId:'mimo1',capabilities:['strong'],clientId:'worker-old',token:crypto.randomBytes(32).toString('hex'),sessionId:'session-old'});
- f.s.store.change(s=>{s.projects.project.bindings['worker:mimo1'].wake={provider:'mimo',threadId:'session-old'};});
+ f.s.store.change(s=>{s.projects.project.bindings['worker:mimo1'].provider='mimo';s.projects.project.bindings['worker:mimo1'].wake={provider:'mimo',threadId:'session-old'};});
  const invitation=await lifecycleCommand(f,{action:'rebind-invite',binding:'worker:mimo1',clientId:old.clientId});
  assert.equal(invitation.ok,true,JSON.stringify(invitation));
- assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','codearts','opencode','wait','any']);
+ assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','codearts','opencode','dsh','wait','any']);
  assert.equal(invitation.provider,'mimo');assert.equal(invitation.platformLabel,'MiMo');
  assert.match(invitation.commandTemplate,/--provider mimo --session-id <当前真实会话 ID> --role worker --worker-id mimo1 --capability strong/);
  assert.doesNotMatch(invitation.commandTemplate,/--recover/);
  const by=Object.fromEntries(invitation.platforms.map(x=>[x.provider,x]));
+ assert.ok(by.codearts.sessionIdRequired);assert.match(by.codearts.commandTemplate,/--provider codearts --session-id <当前真实会话 ID>/);
+ assert.match(by.codearts.text,/CodeArts Hook bridge/);assert.doesNotMatch(by.codearts.commandTemplate,/--provider opencode/);
  assert.ok(by.opencode.sessionIdRequired);assert.match(by.opencode.commandTemplate,/--provider opencode --session-id <当前真实会话 ID>/);
  assert.match(by.opencode.text,/当前真实 ses_ 会话 ID/);
- assert.ok(by.codearts.sessionIdRequired);assert.match(by.codearts.commandTemplate,/--provider codearts --session-id <当前真实会话 ID>/);
  assert.ok(!by.qoder.sessionIdRequired);assert.doesNotMatch(by.qoder.commandTemplate,/session-id/);assert.match(by.qoder.commandTemplate,new RegExp('--invitation-id '+invitation.invitationId));
  assert.match(by.codex.text,/CODEX_THREAD_ID/);assert.doesNotMatch(by.codex.commandTemplate,/session-id/);
- assert.match(by.codearts.text,/discover-session --provider codearts/);assert.match(by.mimo.text,/discover-session --provider mimo/);
  assert.match(by.wait.commandTemplate,/--provider <真实平台名>/);assert.match(by.wait.text,/不要求 --session-id/);
  assert.match(by.mimo.text,/目标平台：MiMo/);assert.match(by.mimo.text,/\[TASK-DISPATCH-REBIND:/);
  assert.ok(invitation.platforms.every(x=>x.text.includes('[TASK-DISPATCH-INVITE:'+invitation.invitationId+']')),'every platform prompt must carry the handshake marker');
@@ -267,10 +302,10 @@ test('rebind invitation emits one adapted prompt per host and defaults to the bo
 test('wait-only host names its own provider instead of the generic placeholder',async t=>{
  const f=await fixture(t),desktop=f.s.admin.desktop;
  const old=desktop.attach({workspace:f.workspace,role:'worker',workerId:'z1',clientId:'worker-old',token:crypto.randomBytes(32).toString('hex')});
- f.s.store.change(s=>{s.projects.project.bindings['worker:z1'].continuation={mode:'wait',provider:'zcode'};});
+ f.s.store.change(s=>{s.projects.project.bindings['worker:z1'].provider='zcode';s.projects.project.bindings['worker:z1'].continuation={mode:'wait',provider:'zcode'};});
  const invitation=await lifecycleCommand(f,{action:'rebind-invite',binding:'worker:z1',clientId:old.clientId});
  assert.equal(invitation.provider,'zcode');
- assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','codearts','opencode','zcode','any']);
+ assert.deepEqual(invitation.platforms.map(x=>x.provider),['codex','mimo','qoder','codearts','opencode','dsh','zcode','any']);
  assert.match(invitation.commandTemplate,/--provider zcode --role worker/);assert.doesNotMatch(invitation.commandTemplate,/session-id/);
 });
 // [AI-added] 2026-09-21
@@ -281,7 +316,7 @@ test('unified console renders the selected platform prompt in the rebind dialog'
  assert.match(app,/result\.platforms\.map/);assert.match(app,/invitation-platform'\)\.value = result\.provider/);
 });
 test('management consoles render resolved tasks as non-blocking audited terminal work',()=>{
- const apps=['runtime/console-web/app.js','runtime/web/app.js'].map(file=>fs.readFileSync(path.resolve(file),'utf8'));
+ const apps=['runtime/console-web/app.js'].map(file=>fs.readFileSync(path.resolve(file),'utf8'));
  for(const app of apps){
   assert.match(app,/resolved:'已由后续任务解决'/);
   assert.match(app,/\['accepted', 'resolved'\]/);
@@ -291,7 +326,7 @@ test('management consoles render resolved tasks as non-blocking audited terminal
 // [AI-added] 2026-09-17 11:46
 test('cancelling a claimed safe rebind removes its pending handover without changing owner',async t=>{
  const f=await fixture(t),desktop=f.s.admin.desktop,token=crypto.randomBytes(32).toString('hex');const old=desktop.attach({workspace:f.workspace,role:'worker',clientId:'worker-old',token,sessionId:'old'});
- f.s.store.change(s=>{s.projects.project.tasks.T={id:'T',title:'T',state:'running',attempts:[{id:'attempt',role:'worker',claimedBy:old.clientId,settled:false}],maxAttempts:30};});
+ f.s.store.change(s=>{s.projects.project.tasks.T={id:'T',title:'T',state:'running',attempts:[{id:'attempt',contractRevision:1,role:'worker',claimedBy:old.clientId,settled:false}],...require('../runtime/core/attempts.cjs').taskFields()};});
  const invitation=await lifecycleCommand(f,{action:'rebind-invite',binding:'worker',clientId:old.clientId});
  const pending=desktop.attach({workspace:f.workspace,role:'worker',clientId:'worker-new',token:crypto.randomBytes(32).toString('hex'),sessionId:'new',replaceClientId:old.clientId,managedRebind:true,rebindInvitationId:invitation.invitationId});assert.equal(pending.handoverPending,true);
  const cancelled=await lifecycleCommand(f,{action:'rebind-cancel',invitationId:invitation.invitationId});assert.equal(cancelled.cancelled,true);assert.equal(f.s.store.state.projects.project.handovers?.worker,undefined);assert.equal(f.s.store.state.projects.project.bindings.worker.clientId,old.clientId);

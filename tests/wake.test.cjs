@@ -7,14 +7,14 @@ const {Wake}=require('../runtime/core/wake.cjs');
 function setup(t){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'wake-test-')),workspace=path.join(root,'work');fs.mkdirSync(workspace);
  const store=new Store(path.join(root,'data'));t.after(()=>store.close());
- const d=new Dispatcher(store,{enableRealCalls:false},()=>{throw Error('no model');});
+ const d=new Dispatcher(store,{maxConcurrent:2});
  const desktop=new Desktop(d);desktop.attach({workspace,role:'worker',clientId:'worker123',token:'a'.repeat(64)});
  // These cases exercise an already-started project's wake lifecycle.
  store.change(s=>{for(const p of Object.values(s.projects))p.startup={state:'started'};});
  const identity=desktop.authenticate('a'.repeat(64));let status='idle',sends=0,fail=false;
  const adapter={read:async()=>({thread:{id:'test-thread',cwd:workspace,status:{type:status}},turns:[]}),send:async()=>{sends++;if(fail)throw Error('lost ack');return {};}};
  const wake=new Wake(desktop,adapter);
- const bind=()=>wake.bind(identity,{provider:'codex',threadId:'test-thread',turnId:'old-turn',experimentalAcknowledged:true});
+ const bind=()=>wake.bind(identity,{provider:'codex',threadId:'test-thread',turnId:'old-turn'});
  const add=()=>{d.addTask(identity.projectId,{id:'T',title:'t',instructions:'i',acceptance:'a',allowedPaths:['README.md']});require('./stage-fixture.cjs').begin(d);};
  const run=()=>store.state.projects[identity.projectId].tasks.T.attempts.at(-1);
  return {store,d,desktop,identity,wake,adapter,bind,add,run,sends:()=>sends,status:v=>status=v,fail:()=>fail=true};
@@ -23,7 +23,7 @@ test('CodeArts rejects malformed model at binding before reading or sending',asy
  const x=setup(t);let reads=0;
  const adapter={read:async()=>{reads++;return x.adapter.read();}};
  const wake=new Wake(x.desktop,{forProvider:()=>adapter});
- const input={provider:'codearts',threadId:'test-thread',experimentalAcknowledged:true};
+ const input={provider:'qoder',threadId:'test-thread'};
  await assert.rejects(wake.bind(x.identity,{...input,model:'deepseek-v4-flash-0731'}),/provider\/model/);
  assert.equal(reads,0);assert.equal(x.sends(),0);
  await wake.bind(x.identity,input);assert.equal(reads,1);
@@ -32,8 +32,8 @@ test('CodeArts rejects malformed model at binding before reading or sending',asy
 test('wake binding rejects explicit provider auto before adapter selection',async t=>{
  const x=setup(t);let selected=false;
  const wake=new Wake(x.desktop,{forProvider:()=>{selected=true;throw Error('must not select');}});
- await assert.rejects(wake.bind(x.identity,{threadId:'thread',turnId:'turn',experimentalAcknowledged:true}),/explicit provider/);
- await assert.rejects(wake.bind(x.identity,{provider:'auto',threadId:'thread',turnId:'turn',experimentalAcknowledged:true}),/Provider auto is not allowed/);
+ await assert.rejects(wake.bind(x.identity,{threadId:'thread',turnId:'turn'}),/explicit provider/);
+ await assert.rejects(wake.bind(x.identity,{provider:'auto',threadId:'thread',turnId:'turn'}),/Provider auto is not allowed/);
  assert.equal(selected,false);
 });
 
@@ -129,7 +129,7 @@ test('reachable MiMo reviewer stays online and a transient wrong-workspace read 
  let cwd=x.store.state.projects[identity.projectId].workspace;
  const adapter={read:async()=>({thread:{id:'mimo-reviewer',cwd,reachable:true,status:{type:'unknown'}},turns:[]})};
  const wake=new Wake(x.desktop,{forProvider:()=>adapter});
- await wake.bind(identity,{provider:'mimo',threadId:'mimo-reviewer',model:'test/model',experimentalAcknowledged:true});
+ await wake.bind(identity,{provider:'mimo',threadId:'mimo-reviewer',model:'test/model'});
  assert.equal(wake.park(identity).parked,true);
  const pre=require('../runtime/core/pre-review.cjs');
  x.d.reviewerPresence.get(identity.projectId).at=0;

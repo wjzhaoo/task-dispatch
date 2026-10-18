@@ -56,6 +56,42 @@ test('OpenCode does not create a missing database or bind without a usable CLI',
   await assert.rejects(f.adapter.verify(f.binding), /CLI unavailable/);
 });
 
+test('OpenCode invitation discovery uses exact user text and workspace without requiring a CLI', async t => {
+  const f = fixture(t), {discover, marker} = require('../runtime/core/session-discovery.cjs');
+  const invitationId = require('node:crypto').randomUUID(), text = marker(invitationId);
+  f.add('assistant', {text});
+  f.add('user', {metadata: {displayText: text}});
+  f.mutate(db => db.prepare('INSERT INTO session_message VALUES (?, 20, ?, ?)').run(f.threadId, 'user', text));
+  const adapters = {forProvider: () => f.adapter}, input = {workspace: f.workspace, provider: 'opencode', invitationId};
+  assert.equal((await discover(input, adapters)).identified, false);
+  f.add('user', {text: `邀请 ${text}`});
+  f.add('user', {text});
+  f.adapter.cliPath = path.join(f.root, 'missing-cli');
+  const before = fs.readFileSync(f.dbPath), result = await discover(input, adapters);
+  assert.equal(result.identified, true); assert.equal(result.sessionId, f.threadId);
+  assert.equal(result.workspace, f.workspace); assert.equal(result.provider, 'opencode');
+  assert.doesNotMatch(JSON.stringify(result), /TASK-DISPATCH-INVITE|metadata|displayText/);
+  assert.deepEqual(fs.readFileSync(f.dbPath), before);
+  assert.equal((await discover({...input, workspace: f.root}, adapters)).identified, false);
+  f.mutate(db => db.prepare('UPDATE session_v2 SET time_archived = 10 WHERE id = ?').run(f.threadId));
+  assert.equal((await discover(input, adapters)).identified, false);
+});
+
+test('OpenCode invitation discovery refuses duplicate matching sessions and ignores legacy sessions', async t => {
+  const f = fixture(t), {discover, marker} = require('../runtime/core/session-discovery.cjs');
+  const invitationId = require('node:crypto').randomUUID(), text = marker(invitationId);
+  const input = {workspace: f.workspace, provider: 'opencode', invitationId}, adapters = {forProvider: () => f.adapter};
+  f.mutate(db => db.prepare('INSERT INTO session VALUES (?, ?)').run('ses_legacy0001', f.workspace));
+  f.add('user', {text}, 'ses_legacy0001');
+  assert.equal((await discover(input, adapters)).identified, false);
+  f.add('user', {text});
+  f.mutate(db => db.prepare('INSERT INTO session_v2 VALUES (?, ?, ?, NULL, 1, ?)').run('ses_duplicate0001', f.workspace, 'build', 'succeeded'));
+  f.add('user', {text}, 'ses_duplicate0001');
+  const result = await discover(input, adapters);
+  assert.equal(result.identified, false); assert.equal(result.reason, 'ambiguous_invitation');
+  assert.equal(result.sessionId, undefined);
+});
+
 test('OpenCode treats active events, pending queues and unknown queue schemas conservatively', async t => {
   const f = fixture(t);
   f.add('user', {text: '当前回合仍在执行'});
@@ -154,14 +190,14 @@ test('OpenCode task notification uses persistent wake receipts and is reconciled
   const f = fixture(t), {Store} = require('../runtime/core/storage.cjs');
   const {Dispatcher} = require('../runtime/core/dispatcher.cjs'), {Desktop} = require('../runtime/core/desktop.cjs'), {Wake} = require('../runtime/core/wake.cjs');
   const store = new Store(path.join(f.root, 'data')); t.after(() => store.close());
-  const d = new Dispatcher(store, {enableRealCalls: false}, () => {throw Error('no model');});
+  const d = new Dispatcher(store,{maxConcurrent:2});
   const desktop = new Desktop(d);
   desktop.attach({workspace: f.workspace, role: 'worker', clientId: 'worker123', token: 'a'.repeat(64), sessionId: f.threadId});
   store.change(s => {for (const p of Object.values(s.projects)) p.startup = {state: 'started'};});
   const identity = desktop.authenticate('a'.repeat(64));
   const wake = new Wake(desktop, {forProvider: provider => {assert.equal(provider, 'opencode'); return f.adapter;}});
-  await assert.rejects(wake.bind(identity, {...f.binding, model: 'invalid', experimentalAcknowledged: true}), /provider\/model/);
-  await wake.bind(identity, {...f.binding, experimentalAcknowledged: true});
+  await assert.rejects(wake.bind(identity, {...f.binding, model: 'invalid'}), /provider\/model/);
+  await wake.bind(identity, {...f.binding});
   assert.equal(wake.park(identity).parked, true);
   d.addTask(identity.projectId, {id: 'T', title: 'T', instructions: 'i', acceptance: 'a', allowedPaths: ['result.txt']});
   require('./stage-fixture.cjs').begin(d); d.tick();
@@ -193,6 +229,58 @@ test('OpenCode discovers Desktop 2.x CLI versions numerically and respects expli
   assert.throws(() => findOpenCodeCli({APPDATA: f.workspace, PATH: ''}), /CLI unavailable/);
 });
 
+test('OpenCode discovers architecture-suffixed Desktop CLI directories for the current host', t => {
+  const f = fixture(t), name = process.platform === 'win32' ? 'opencode-cli.exe' : 'opencode-cli';
+  const otherArch = process.arch === 'arm64' ? 'x64' : 'arm64', native = `2.0.32-${process.arch}`;
+  for (const version of ['2.0.9', '2.0.32', native, `2.0.99-${otherArch}`, '2.0.100-beta', '1.99.99']) {
+    const dir = path.join(f.root, 'ai.opencode.desktop', 'cli', version);
+    fs.mkdirSync(dir, {recursive: true}); fs.writeFileSync(path.join(dir, name), '');
+  }
+  const env = {APPDATA: f.root, PATH: ''};
+  assert.equal(findOpenCodeCli(env), path.join(f.root, 'ai.opencode.desktop', 'cli', native, name));
+  fs.unlinkSync(path.join(f.root, 'ai.opencode.desktop', 'cli', native, name));
+  assert.equal(findOpenCodeCli(env), path.join(f.root, 'ai.opencode.desktop', 'cli', '2.0.32', name));
+});
+
+test('OpenCode rediscovers the CLI after Desktop replaces its version directory', async t => {
+  const f = fixture(t), name = process.platform === 'win32' ? 'opencode-cli.exe' : 'opencode-cli';
+  const install = version => {
+    const file = path.join(f.root, 'ai.opencode.desktop', 'cli', version, name);
+    fs.mkdirSync(path.dirname(file), {recursive: true}); fs.writeFileSync(file, ''); return file;
+  };
+  const old = install(`2.0.29-${process.arch}`);
+  f.adapter.cliPath = undefined; f.adapter.env = {APPDATA: f.root, PATH: ''};
+  await f.adapter.verify(f.binding);
+  fs.unlinkSync(old);
+  const current = install(`2.0.32-${process.arch}`);
+  let calls = 0;
+  f.adapter.runCli = (file, args) => {
+    calls++; assert.equal(file, current); assert.equal(args[2], f.threadId);
+    f.add('user', {text: args.at(-1)}); return {done: Promise.resolve({code: 0})};
+  };
+  assert.equal((await f.adapter.send(f.binding, message)).delivered, true);
+  assert.equal(calls, 1); assert.equal(f.adapter.cliPath, undefined);
+});
+
+test('OpenCode preserves a missing explicit CLI even when automatic discovery has a replacement', async t => {
+  const f = fixture(t), dir = path.join(f.root, 'ai.opencode.desktop', 'cli', '2.0.32');
+  fs.mkdirSync(dir, {recursive: true});
+  fs.writeFileSync(path.join(dir, process.platform === 'win32' ? 'opencode-cli.exe' : 'opencode-cli'), '');
+  f.adapter.env = {APPDATA: f.root, PATH: ''}; f.adapter.cliPath = path.join(f.root, 'removed-explicit-cli');
+  let calls = 0; f.adapter.runCli = () => {calls++;};
+  await assert.rejects(f.adapter.verify(f.binding), /CLI unavailable/);
+  await assert.rejects(f.adapter.send(f.binding, message), error => error.safeToRetry === true);
+  assert.equal(calls, 0);
+});
+
+test('OpenCode startup and exit diagnostics keep definite failures retryable and uncertain delivery distinct', async t => {
+  const f = fixture(t);
+  f.adapter.runCli = () => ({done: Promise.resolve({spawnError: 'ENOENT'})});
+  await assert.rejects(f.adapter.send(f.binding, message), error => error.safeToRetry === true && /重新查找/.test(error.wakeHint));
+  f.adapter.runCli = () => ({done: Promise.resolve({code: 1, errorMessage: 'Session environment rejected'})});
+  await assert.rejects(f.adapter.send(f.binding, message), error => !error.safeToRetry && /Session environment rejected/.test(error.wakeHint));
+});
+
 test('OpenCode CLI transport passes literal argv without a shell', async t => {
   const f = fixture(t), sentinel = path.join(f.root, 'literal.json');
   const literal = '中文 & $() "引号"';
@@ -202,8 +290,32 @@ test('OpenCode CLI transport passes literal argv without a shell', async t => {
   finally {clearInterval(keepAlive);}
 });
 
+test('OpenCode CLI transport captures bounded diagnostics while omitting transcript and credentials', async t => {
+  const f = fixture(t), secret = 'a'.repeat(64);
+  const source = `console.log(JSON.stringify({type:'text',part:{text:'PRIVATE-ASSISTANT-TEXT'}}));console.log(JSON.stringify({type:'error',error:{message:'启动失败 token=sample-secret ${secret} '+process.argv[1]+' '+ 'x'.repeat(4000)}}));process.exitCode=1;`;
+  const {done} = runOpenCodeCli(process.execPath, ['-e', source, message], {cwd: f.workspace});
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    const result = await done;
+    assert.equal(result.code, 1); assert.match(result.errorMessage, /启动失败/);
+    assert.ok(result.errorMessage.length <= 1200);
+    for (const hidden of ['PRIVATE-ASSISTANT-TEXT', secret, 'sample-secret', message]) assert.ok(!JSON.stringify(result).includes(hidden));
+  } finally {clearInterval(keepAlive);}
+});
+
+test('OpenCode CLI transport retains sanitized stderr when no structured error is emitted', async t => {
+  const f = fixture(t);
+  const {done} = runOpenCodeCli(process.execPath, ['-e', 'console.error("启动失败 Authorization: Bearer secret-value");process.exitCode=1;'], {cwd: f.workspace});
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    const result = await done;
+    assert.equal(result.code, 1); assert.match(result.errorMessage, /启动失败/);
+    assert.ok(!result.errorMessage.includes('secret-value'));
+  } finally {clearInterval(keepAlive);}
+});
+
 test('real CLI connects OpenCode brain, reviewer and worker, then resumes the verified original sessions', async t => {
-  const f = fixture(t), {initialize} = require('../runtime/wizard.cjs'), {serve} = require('../runtime/server.cjs');
+  const f = fixture(t), {initialize} = require('../runtime/wizard.cjs'), {serve} = require('./service-fixture.cjs');
   const {WakeProviders} = require('../runtime/adapters/mimo-wake.cjs');
   const execFile = require('node:util').promisify(require('node:child_process').execFile);
   const data = path.join(f.root, 'data'); initialize(data);
@@ -226,8 +338,8 @@ test('real CLI connects OpenCode brain, reviewer and worker, then resumes the ve
       if (role === 'brain') assert.ok(connected.reviewerInvite.platformOptions.includes('opencode'));
       assert.equal((await run(['resume', '--credential', connected.credential])).parked, true);
     }
-    const missing = await run(['connect', '--provider', 'opencode', '--role', 'worker', '--worker-id', 'missing', '--session-id', 'ses_absent0001']);
-    assert.equal(missing.continuation.mode, 'attention'); assert.equal(missing.nextAction, 'attention');
-    assert.equal(missing.parked, undefined);
+    const before=JSON.stringify(server.store.state);
+    await assert.rejects(run(['connect','--provider','opencode','--role','worker','--worker-id','missing','--session-id','ses_absent0001']),/OpenCode session does not exist/);
+    assert.equal(JSON.stringify(server.store.state),before);
   } finally {await server.close();}
 });

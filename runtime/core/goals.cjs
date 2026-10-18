@@ -10,37 +10,11 @@ function add(project, input, fingerprint) {
   project.goalQueue ||= [];
   const createdAt = at(), goalId = 'goal-' + id();
   const goal = { id: goalId, title: input.title, objective: input.objective, createdAt,
-    state: input.startMode === 'manual' ? 'draft' : 'queued', commandId: input.commandId, fingerprint,
-    startAuthorizedAt: input.startMode === 'manual' ? null : createdAt };
+    state: 'draft', commandId: input.commandId, fingerprint,
+    startAuthorizedAt: null };
   project.goals[goalId] = goal;
   if (goal.state === 'queued') project.goalQueue.push(goalId);
   return goal;
-}
-
-// Attach ownership metadata only. Historical frozen contracts and artifacts stay intact.
-function adopt(project) {
-  if (project.goals) return;
-  project.goals = {}; project.goalQueue = []; project.activeGoalId = null;
-  const tasks = Object.values(project.tasks || {}), rounds = Object.values(project.reviewStages || {});
-  if (!project.webSetup && !tasks.length && !rounds.length && !project.planning) return;
-  const goalId = 'goal-' + id(), completed = !!project.completedAt;
-  const active = !completed && (project.startup?.state === 'started' || tasks.some(task => !terminal(task)) || !!project.planning || rounds.some(round => !['completed', 'reset'].includes(round.state)));
-  const goal = { id: goalId, title: project.title || '已有项目目标', objective: project.objective || '', legacy: true,
-    createdAt: project.webSetup?.createdAt || at(), state: completed ? 'completed' : active ? 'active' : 'draft',
-    startAuthorizedAt: active || completed ? project.startup?.startedAt || project.webSetup?.createdAt || at() : null,
-    ...(completed ? { completedAt: project.completedAt } : {}),
-    ...(project.webSetup?.commandId ? { commandId: project.webSetup.commandId, fingerprint: project.webSetup.fingerprint, legacyFingerprint: true } : {}) };
-  project.goals[goalId] = goal;
-  if (active) project.activeGoalId = goalId;
-  for (const task of tasks) task.goalId ||= goalId;
-  for (const round of rounds) round.goalId ||= goalId;
-  if (project.planning) project.planning.goalId ||= goalId;
-  for (const record of project.planningHistory || []) record.goalId ||= goalId;
-}
-
-function migrate(store) {
-  const ids = Object.values(store.state.projects).filter(p => p.webSetup && !p.goals).map(p => p.id);
-  if (ids.length) store.change(state => { for (const key of ids) adopt(state.projects[key]); });
 }
 
 function taskGoal(project, suppliedGoalId) {
@@ -99,6 +73,9 @@ function authorize(dispatcher, projectId, goalId, confirmed) {
   if (confirmed !== true) throw Error('开始目标需要用户明确授权');
   if (goal.state === 'cancelled') throw Error('已取消目标不能重新开始，请新建目标');
   if (goal.startAuthorizedAt) return { ok: true, duplicate: true, goalId };
+  if (p.paused) throw Error('项目已暂停，请先点击继续，再开始目标');
+  const team = dispatcher.desktop && require('./project-setup.cjs').team(dispatcher.desktop, p);
+  if (!team?.total || team.ready !== team.total) throw Error('所有成员就绪后才能开始目标');
   dispatcher.store.change(s => {
     const q = s.projects[projectId], value = q.goals[goalId];
     value.startAuthorizedAt = at(); value.state = 'queued'; q.goalQueue.push(goalId);
@@ -131,7 +108,7 @@ function finish(desktop, identity, input) {
   const tasks = Object.values(p.tasks).filter(task => task.goalId === goalId), stages = require('./stage-review.cjs');
   const rounds = Object.values(p.reviewStages || {}).filter(round => round.goalId === goalId);
   if (d.active.has(p.id) || [...d.pendingSettlements.values()].some(value => value.projectId === p.id) || !tasks.length || tasks.some(task => !terminal(task) || task.attempts.some(a => !a.settled)) || stages.active(p) || stages.unresolved(p) || p.planning?.state === 'blocked') throw Error('目标仍有未完成、未结算或未通过终审的工作');
-  if (!goal.legacy && tasks.some(task => !rounds.some(round => round.state === 'completed' && round.verdict === 'pass' && (round.reviewTaskIds || round.members.map(m => m.taskId)).includes(task.id)) && task.state !== 'resolved')) throw Error('目标的执行任务必须通过完整阶段终审');
+  if (tasks.some(task => !rounds.some(round => round.state === 'completed' && round.verdict === 'pass' && (round.reviewTaskIds).includes(task.id)) && task.state !== 'resolved')) throw Error('目标的执行任务必须通过完整阶段终审');
   const planningId = p.planning?.id;
   d.store.change(s => {
     const q = s.projects[p.id], value = q.goals[goalId], now = at();
@@ -161,7 +138,7 @@ function summary(p) {
     return { id: goal.id, title: goal.title, objective: goal.objective, state: goal.state, createdAt: goal.createdAt,
       startAuthorizedAt: goal.startAuthorizedAt || null, startedAt: goal.startedAt || null, completedAt: goal.completedAt || null,
       cancelledAt: goal.cancelledAt || null, summary: goal.summary || null, blockedReason: goal.blockedReason ? require('./monitor.cjs').clean(goal.blockedReason) : null,
-      taskCount: owned.length, completedTaskCount: owned.filter(terminal).length, legacy: !!goal.legacy };
+      taskCount: owned.length, completedTaskCount: owned.filter(terminal).length };
   }) };
 }
 
@@ -169,4 +146,4 @@ function brief(p) {
   const goal = current(p) || p.goals?.[p.goalQueue?.[0]] || Object.values(p.goals || {}).find(value => value.state === 'draft');
   return goal ? { goalId: goal.id, title: goal.title, objective: goal.objective } : { title: p.title, objective: p.goals ? '' : p.objective };
 }
-module.exports = { add, adopt, migrate, current, taskGoal, reconcile, authorize, cancel, finish, assertTeamIdle, summary, brief, ended };
+module.exports = { add, current, taskGoal, reconcile, authorize, cancel, finish, assertTeamIdle, summary, brief, ended };

@@ -6,6 +6,8 @@ const fs=require('node:fs'),path=require('node:path');
 const {serve,reuse}=require('../runtime/catalog-console.cjs');
 const registry=require('../runtime/core/service-registry.cjs');
 const {atomic}=require('../runtime/core/storage.cjs');
+const projectFields={mode:'desktop',maxTurns:null,projectBudgetEnabled:false,turns:0};
+const taskFields=require('../runtime/core/attempts.cjs').taskFields;
 
 async function login(catalog){
   const url=`http://127.0.0.1:${catalog.server.address().port}`,ticket=new URL(catalog.createTicket()).hash.slice(8);
@@ -17,28 +19,18 @@ test('empty catalog web home stays available and observes projects and tasks add
   const catalog=await serve({registryOptions:{file,home}});t.after(()=>catalog.close());const session=await login(catalog),headers={Cookie:session.cookie};
   assert.equal((await fetch(session.url+'/catalog/')).status,200);
   const boardAsset=await fetch(session.url+'/catalog/task-board.mjs');assert.equal(boardAsset.status,200);assert.match(boardAsset.headers.get('content-type'),/javascript/);assert.match(await boardAsset.text(),/export function buildBoard/);
+  const commandAsset=await fetch(session.url+'/catalog/command-policy.mjs');assert.equal(commandAsset.status,200);assert.match(commandAsset.headers.get('content-type'),/javascript/);assert.match(await commandAsset.text(),/export function buildCommand/);
   let view=await (await fetch(session.url+'/catalog/api/projects',{headers})).json();assert.deepEqual(view.projects,[]);
   const workspace=path.join(temp,'project'),root=path.join(temp,'service');fs.mkdirSync(workspace);fs.mkdirSync(root);atomic(path.join(root,'config.json'),{version:1});
-  atomic(path.join(root,'state.json'),{version:2,revision:0,projects:{p:{id:'p',workspace,tasks:{}}},events:[]});registry.register(root,[workspace],{file});
+  atomic(path.join(root,'state.json'),{version:2,revision:0,projects:{p:{id:'p',workspace,...projectFields,tasks:{}}},events:[]});registry.register(root,[workspace],{file});
   view=await (await fetch(session.url+'/catalog/api/projects',{headers})).json();assert.equal(view.projects.length,1);assert.equal(view.projects[0].taskCount,0);
-  atomic(path.join(root,'state.json'),{version:2,revision:1,projects:{p:{id:'p',workspace,tasks:{T:{id:'T',state:'ready'}}}},events:[]});
+  atomic(path.join(root,'state.json'),{version:2,revision:1,projects:{p:{id:'p',workspace,...projectFields,tasks:{T:{id:'T',state:'ready',...taskFields(),attempts:[]}}}},events:[]});
   view=await (await fetch(session.url+'/catalog/api/projects',{headers})).json();assert.equal(view.projects[0].taskCount,1);assert.equal(view.projects[0].activeTaskCount,1);
-  atomic(path.join(root,'state.json'),{version:2,revision:2,projects:{p:{id:'p',workspace,tasks:{T:{id:'T',state:'resolved'},U:{id:'U',state:'accepted'},V:{id:'V',state:'blocked'}}}},events:[]});
+  atomic(path.join(root,'state.json'),{version:2,revision:2,projects:{p:{id:'p',workspace,...projectFields,tasks:{T:{id:'T',state:'resolved',...taskFields(),attempts:[]},U:{id:'U',state:'accepted',...taskFields(),attempts:[]},V:{id:'V',state:'blocked',...taskFields(),attempts:[]}}}},events:[]});
   view=await (await fetch(session.url+'/catalog/api/projects',{headers})).json();assert.equal(view.projects[0].taskCount,3);assert.equal(view.projects[0].activeTaskCount,1);
 });
 
 // [AI-added] 2026-09-19 00:40
-// Deprecated: /catalog/api/open cross-port redirect was replaced by the same-origin
-// gateway routes /catalog/api/p/<key>/*. The replacement behavior is covered by the
-// gateway tests below. Kept for reference only.
-// test('catalog opens the selected project service with a one-time admin ticket',async t=>{
-//   const temp=fs.mkdtempSync(path.resolve('tmp/catalog-open-')),file=path.join(temp,'registry.json'),home=path.join(temp,'home'),workspace=path.join(temp,'project'),root=path.join(temp,'service');t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));fs.mkdirSync(workspace);fs.mkdirSync(root);
-//   atomic(path.join(root,'config.json'),{version:1,enableRealCalls:false,maxConcurrent:1,profiles:{codex:{adapter:'codex',command:process.execPath,args:[]}}});
-//   const target=await require('../runtime/server.cjs').serve(root);t.after(()=>target.close());target.dispatcher.addProject({id:'p',workspace,mode:'desktop'});registry.register(root,[workspace],{file});
-//   const catalog=await serve({registryOptions:{file,home}});t.after(()=>catalog.close());const session=await login(catalog),list=await (await fetch(session.url+'/catalog/api/projects',{headers:{Cookie:session.cookie}})).json();
-//   const response=await fetch(session.url+'/catalog/api/open',{method:'POST',headers:{Cookie:session.cookie,Origin:session.url,'X-CSRF-Token':session.csrf,'Content-Type':'application/json'},body:JSON.stringify({key:list.projects[0].key})});
-//   assert.equal(response.status,200);const opened=await response.json();assert.match(opened.url,new RegExp(`^http://127\\.0\\.0\\.1:${target.server.address().port}/admin/#ticket=`));
-// });
 // [AI-added] 2026-09-21 10:20: The header version badge loads before login.
 test('catalog console reports its service version without a session',async t=>{
   const temp=fs.mkdtempSync(path.resolve('tmp/catalog-version-')),file=path.join(temp,'registry.json'),home=path.join(temp,'home');t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
@@ -52,8 +44,8 @@ async function fixture(t, prefix) {
   const temp = fs.mkdtempSync(path.resolve('tmp/' + prefix)), file = path.join(temp, 'registry.json'), home = path.join(temp, 'home'), workspace = path.join(temp, 'project'), root = path.join(temp, 'service');
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   fs.mkdirSync(workspace); fs.mkdirSync(root);
-  atomic(path.join(root, 'config.json'), { version: 1, enableRealCalls: false, maxConcurrent: 1, profiles: { codex: { adapter: 'codex', command: process.execPath, args: [] } } });
-  const target = await require('../runtime/server.cjs').serve(root); t.after(() => target.close());
+  atomic(path.join(root, 'config.json'), { version: 1, maxConcurrent: 1 });
+  const target = await require('./service-fixture.cjs').serve(root); t.after(() => target.close());
   target.dispatcher.addProject({ id: 'p', workspace, mode: 'desktop' });
   registry.register(root, [workspace], { file });
   const catalog = await serve({ registryOptions: { file, home } }); t.after(() => catalog.close());
@@ -99,7 +91,7 @@ test('catalog gateway re-establishes the server-side session after the project s
   // Restart the project service on a new port; the cached gateway session points at a dead origin.
   const root = target.monitor.directory.replace(/[\\/]monitor$/, '');
   await target.close();
-  const restarted = await require('../runtime/server.cjs').serve(root); t.after(() => restarted.close());
+  const restarted = await require('./service-fixture.cjs').serve(root); t.after(() => restarted.close());
   const after = await (await fetch(session.url + `/catalog/api/p/${key}/overview`, { headers })).json();
   assert.ok(after.projects.some(p => p.id === 'p'));
   assert.notEqual(after.instanceId, before.instanceId);
@@ -119,19 +111,18 @@ test('a second launch reuses the running catalog console instead of failing on a
   assert.equal((await fetch(`http://127.0.0.1:${second.port}/catalog/`)).status,200);
   const third=await fetch(`http://127.0.0.1:${first.port}/catalog/ticket`,{method:'POST'});assert.equal(third.status,401);
 });
-// [AI-added] 2026-09-24 13:29: The new home record wins while old AppData consoles remain discoverable.
-test('console state uses the home index and can reuse a legacy AppData process',async t=>{
+test('console reuse only discovers the home record even with a live legacy AppData console',async t=>{
   const mod=require('../runtime/catalog-console.cjs');
-  const temp=fs.mkdtempSync(path.resolve('tmp/catalog-home-')),home=path.join(temp,'home'),cacheRoot=path.join(temp,'local');
+  const temp=fs.mkdtempSync(path.resolve('tmp/catalog-home-')),home=path.join(temp,'home'),cacheRoot=path.join(home,'AppData','Local');
   t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
-  const oldFile=mod.legacyConsoleFile(cacheRoot),currentFile=mod.consoleFile(home);
+  const oldFile=path.join(cacheRoot,'task-dispatch','console.json'),currentFile=mod.consoleFile(home);
   assert.equal(currentFile,path.join(home,'.task-dispatch-service','console.json'));
-  const old=await serve({stateFile:oldFile});
-  try {assert.equal(new URL(await reuse({home,cacheRoot})).port,String(old.port));}
-  finally {await old.close();}
+  const old=await serve({stateFile:oldFile});t.after(()=>old.close());
+  assert.equal(await reuse({home,cacheRoot}),null);
   const current=await serve({stateFile:currentFile});
   try {assert.equal(new URL(await reuse({home,cacheRoot})).port,String(current.port));}
   finally {await current.close();}
+  assert.equal(await reuse({home,cacheRoot}),null);
 });
 // [AI-added] 2026-09-21: the home page controls each project's own service process.
 test('catalog home reports service version and guards start, stop and restart', async t => {
@@ -156,13 +147,8 @@ test('catalog home reports service version and guards start, stop and restart', 
   assert.equal((await post({ key, action: 'pause' })).status, 400);
   assert.equal((await post({ key, action: 'stop' })).status, 400);
   assert.equal((await view()).serviceVersion, require('../package.json').version);
-  target.store.change(s => { s.projects.p.tasks.T = { id: 'T', title: 'T', state: 'running', maxAttempts: 30, attempts: [{ id: 'a', role: 'worker', claimedBy: 'client', settled: false }] }; });
+  target.store.change(s => { s.projects.p.tasks.T = { id: 'T', title: 'T', state: 'running', ...taskFields(), attempts: [{ id: 'a', contractRevision:1, role: 'worker', claimedBy: 'client', settled: false }] }; });
   const facts = await view(); assert.equal(facts.inFlight, 1); assert.equal(facts.unclaimed, 1);
-  // A headless execution in flight is the one case the home page must not interrupt.
-  target.store.change(s => { s.projects.p.mode = 'headless'; });
-  const refused = await post({ key, action: 'stop', confirmed: true });
-  assert.equal(refused.status, 400); assert.match((await refused.json()).error,/无人值守/);
-  target.store.change(s => { s.projects.p.mode = 'desktop'; });
   const stopped = await post({ key, action: 'stop', confirmed: true }), stopResult = await stopped.json();
   assert.equal(stopped.status, 200, JSON.stringify(stopResult));
   assert.equal(stopResult.online, false); assert.equal(stopResult.unclaimed, 1);

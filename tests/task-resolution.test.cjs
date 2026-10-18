@@ -1,4 +1,5 @@
 'use strict';
+const {registerDesktop}=require('./service-fixture.cjs');
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path');
@@ -7,7 +8,7 @@ const {Dispatcher}=require('../runtime/core/dispatcher.cjs');
 const {Desktop}=require('../runtime/core/desktop.cjs');
 const {Monitor}=require('../runtime/core/monitor.cjs');
 const {initialize,request}=require('../runtime/wizard.cjs');
-const {serve}=require('../runtime/server.cjs');
+const {serve}=require('./service-fixture.cjs');
 const {call}=require('../runtime/desktop-client.cjs');
 
 function temporary(t,prefix){
@@ -16,16 +17,11 @@ function temporary(t,prefix){
  return root;
 }
 
-function runtime(t,handler){
+function runtime(t){
  const root=temporary(t,'task-resolution-'),workspace=path.join(root,'work');
  fs.mkdirSync(workspace);fs.writeFileSync(path.join(workspace,'README.md'),'base');
  const store=new Store(path.join(root,'data'));t.after(()=>store.close());
- const d=new Dispatcher(store,{enableRealCalls:true,profiles:{a:{adapter:'codex'}}},()=>({run:async o=>{
-  const context=JSON.parse(o.prompt.split('\n\n')[3]);
-  const result={...context.identity,summary:'done',...(o.role==='worker'?{status:'submitted',checks:[],unverified:[]}:{artifactId:context.artifactId,verdict:'pass',findings:[]})};
-  if(o.role==='worker')fs.appendFileSync(path.join(o.cwd,'README.md'),'\n'+context.identity.taskId);
-  await handler?.(o,context,result);return {text:JSON.stringify(result)};
- }}));
+ const d=new Dispatcher(store,{maxConcurrent:2});
  d.addProject({id:'p',workspace,mode:'desktop'});store.change(s=>s.projects.p.startup={state:'started'});
  const step=async()=>{d.tick();await Promise.all([...d.active.values()].map(item=>item.promise));};
  return {root,workspace,store,d,step,project:()=>store.state.projects.p};
@@ -33,11 +29,30 @@ function runtime(t,handler){
 
 function blocked(d,id='OLD'){
  d.addTask('p',{id,title:'old',instructions:'old work',acceptance:'old accepted',allowedPaths:['README.md']});
- d.store.change(s=>{const task=s.projects.p.tasks[id];task.state='blocked';task.error='historic failure';task.blockKind='review';task.attempts=[{id:'settled-'+id,role:'brain',settled:true}];task.attention={id:'alert-'+id,message:'historic failure',kind:'blocked',acknowledged:false};});
+ d.store.change(s=>{const task=s.projects.p.tasks[id];task.state='blocked';task.error='historic failure';task.blockKind='review';task.attempts=[{id:'settled-'+id,contractRevision:1,role:'brain',settled:true}];task.attention={id:'alert-'+id,message:'historic failure',kind:'blocked',acknowledged:false};});
 }
 
+test('brain attention deferral is explicit through the authenticated CLI and stays visible',async t=>{
+ const dir=temporary(t,'brain-attention-http-'),workspace=path.join(dir,'work'),root=path.join(dir,'data');
+ fs.mkdirSync(workspace);initialize(root);const s=await serve(root);t.after(()=>s.close());
+ const brain=await registerDesktop(root,{workspace,role:'brain',clientId:'brain-client',token:'b'.repeat(64)});
+ s.store.change(state=>{state.projects[brain.projectId].startup={state:'started'};});
+ s.dispatcher.addTask(brain.projectId,{id:'T',title:'T',instructions:'i',acceptance:'a',allowedPaths:['README.md']});
+ s.store.change(state=>{const p=state.projects[brain.projectId];p.startup={state:'started'};p.tasks.T.state='blocked';p.tasks.T.error='missing permission';});
+ require('../runtime/core/brain-attention.cjs').raise(s.dispatcher,brain.projectId,'T','missing permission');
+ const alertId=s.store.state.projects[brain.projectId].tasks.T.attention.id,file=path.join(root,'brain.json');
+ fs.writeFileSync(file,JSON.stringify({...brain,data:root,workspace}));
+ const exec=require('node:util').promisify(require('node:child_process').execFile);
+ const args=[path.resolve('runtime/desktop-client.cjs'),'attention-ack','--task','T','--alert-id',alertId,'--credential',file,'--data',root];
+ await assert.rejects(exec(process.execPath,args,{windowsHide:true}),/任务仍然阻塞/);
+ assert.equal(JSON.parse((await exec(process.execPath,[...args,'--wait-reason','需要用户提供测试环境权限'],{windowsHide:true})).stdout).ok,true);
+ const status=await call(root,brain,{action:'status'});
+ assert.equal(status.tasks.find(task=>task.id==='T').attention.waitReason,'需要用户提供测试环境权限');
+ assert.ok(s.monitor.snapshot().projects[0].alerts.some(alert=>alert.code==='waiting_user'));
+});
+
 test('accepted stage replacement resolves old blocks and subsequent stages can depend on them',async t=>{
- const x=await require('./stage-fixture.cjs').setup(t);blocked(x.d);require('../runtime/core/brain-attention.cjs').acknowledge(x.desktop,x.identities.brain,{taskId:'OLD',alertId:'alert-OLD'});x.task('FIX',{supersedes:['OLD'],supersedeReason:'FIX fully replaces OLD'});x.register(x.definition(['FIX']));await x.execute('FIX');x.final(await x.claim('brain'));assert.equal(x.p().tasks.OLD.state,'resolved');assert.equal(x.p().tasks.OLD.resolution.replacementTaskId,'FIX');
+ const x=await require('./stage-fixture.cjs').setup(t);blocked(x.d);x.task('FIX',{supersedes:['OLD'],supersedeReason:'FIX fully replaces OLD'});x.register(x.definition(['FIX']));require('../runtime/core/brain-attention.cjs').acknowledge(x.desktop,x.identities.brain,{taskId:'OLD',alertId:'alert-OLD'});assert.equal(x.p().tasks.OLD.attention.remediationTaskId,'FIX');await x.execute('FIX');x.final(await x.claim('brain'));assert.equal(x.p().tasks.OLD.state,'resolved');assert.equal(x.p().tasks.OLD.resolution.replacementTaskId,'FIX');
  x.task('NEXT',{dependsOn:['OLD']});x.register(x.definition(['NEXT'],'next-round','next-stage'));await x.execute('NEXT');x.final(await x.claim('brain'));assert.doesNotThrow(()=>x.d.finishProject('p'));
 });
 
@@ -61,7 +76,7 @@ test('replacement relationships reject unsafe or ambiguous resolution',t=>{
 test('brain can revise unstarted contracts and use guarded recovery operations',t=>{
  const root=temporary(t,'brain-control-'),workspace=path.join(root,'work');fs.mkdirSync(workspace);
  const store=new Store(path.join(root,'data'));t.after(()=>store.close());
- const d=new Dispatcher(store,{enableRealCalls:false},()=>{throw Error('no model');}),desktop=new Desktop(d);
+ const d=new Dispatcher(store,{maxConcurrent:2}),desktop=new Desktop(d);
  desktop.attach({workspace,role:'brain',clientId:'brain-client',token:'b'.repeat(64)});
  desktop.attach({workspace,role:'reviewer',clientId:'reviewer-client',token:'c'.repeat(64)});
  const brain=desktop.authenticate('b'.repeat(64)),other=desktop.authenticate('c'.repeat(64)),projectId=brain.projectId;
@@ -71,7 +86,7 @@ test('brain can revise unstarted contracts and use guarded recovery operations',
  assert.throws(()=>desktop.reviseTask(other,{taskId:'FUTURE',task:v2,reason:'change'}),/Only brain/);
  assert.equal(desktop.reviseTask(brain,{taskId:'FUTURE',task:v2,reason:'new evidence'}).contractRevision,2);
  assert.equal(store.state.projects[projectId].tasks.FUTURE.instructionHistory[0].reason,'new evidence');
- store.change(s=>{s.projects[projectId].tasks.FUTURE.attempts.push({id:'done',role:'worker',settled:true});});
+ store.change(s=>{s.projects[projectId].tasks.FUTURE.attempts.push({id:'done',contractRevision:2,role:'worker',settled:true});});
  assert.throws(()=>desktop.reviseTask(brain,{taskId:'FUTURE',task:v2,reason:'late change'}),/replacement task/);
  d.addTask(projectId,{id:'RETRY',title:'retry',instructions:'i',acceptance:'a',allowedPaths:['README.md']});
  store.change(s=>{const task=s.projects[projectId].tasks.RETRY;task.state='blocked';task.error='boom';task.resumePhase='worker';task.attention={id:'alert',message:'boom',kind:'blocked',acknowledged:false};});
@@ -98,9 +113,9 @@ test('monitor and status expose resolved evidence without an active alert',t=>{
 test('brain recovery actions work through the authenticated desktop HTTP routes',async t=>{
  const container=temporary(t,'brain-http-'),root=path.join(container,'data'),workspace=path.join(container,'work');fs.mkdirSync(workspace);fs.writeFileSync(path.join(workspace,'README.md'),'base');initialize(root);
  const service=await serve(root);t.after(()=>service.close());
- const brain=await request(root,{action:'attach-desktop',workspace,role:'brain',clientId:'brain-client',token:'b'.repeat(64)});
- const reviewer=await request(root,{action:'attach-desktop',workspace,role:'reviewer',clientId:'reviewer-client',token:'c'.repeat(64)});
- await request(root,{action:'attach-desktop',workspace,role:'worker',clientId:'worker-client',token:'d'.repeat(64)});
+ const brain=await registerDesktop(root,{workspace,role:'brain',clientId:'brain-client',token:'b'.repeat(64)});
+ const reviewer=await registerDesktop(root,{workspace,role:'reviewer',clientId:'reviewer-client',token:'c'.repeat(64)});
+ await registerDesktop(root,{workspace,role:'worker',clientId:'worker-client',token:'d'.repeat(64)});
  await call(root,reviewer,{action:'heartbeat'});
  await call(root,brain,{action:'start-work',confirmed:true});
  service.store.change(s=>{s.projects[brain.projectId].paused=true;});
@@ -110,7 +125,7 @@ test('brain recovery actions work through the authenticated desktop HTTP routes'
  await assert.rejects(call(root,reviewer,{action:'revise-task',taskId:'FUTURE',task:{id:'FUTURE',title:'x',instructions:'x',acceptance:'x',allowedPaths:['README.md']},reason:'unauthorized'}),/Only brain/);
  service.dispatcher.addTask(brain.projectId,{id:'OLD',title:'old',instructions:'old',acceptance:'old',allowedPaths:['README.md']});
  service.dispatcher.addTask(brain.projectId,{id:'FIX',title:'fix',instructions:'fix',acceptance:'fixed',allowedPaths:['README.md']});
- service.store.change(s=>{const tasks=s.projects[brain.projectId].tasks;tasks.OLD.state='blocked';tasks.OLD.error='historic';tasks.OLD.attempts=[{id:'old-attempt',role:'worker',settled:true}];tasks.FIX.state='accepted';});
+ service.store.change(s=>{const tasks=s.projects[brain.projectId].tasks;tasks.OLD.state='blocked';tasks.OLD.error='historic';tasks.OLD.attempts=[{id:'old-attempt',contractRevision:1,role:'worker',settled:true}];tasks.FIX.state='accepted';});
  assert.equal((await call(root,brain,{action:'resolve-task',taskId:'OLD',replacementTaskId:'FIX',reason:'accepted replacement'})).ok,true);
  service.dispatcher.addTask(brain.projectId,{id:'RETRY',title:'retry',instructions:'retry',acceptance:'retried',allowedPaths:['README.md']});
  service.store.change(s=>{const task=s.projects[brain.projectId].tasks.RETRY;task.state='blocked';task.error='temporary';task.resumePhase='brain';});

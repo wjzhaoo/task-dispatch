@@ -14,7 +14,7 @@ async function review(t,withEvidence=false){
   fs.writeFileSync(path.join(workspace,'check.cjs'),"// [AI-added] 2026-09-22 09:20\nconst fs=require('fs');fs.writeFileSync('tmp/result.json',JSON.stringify({version:1,checks:[{id:'complete',passed:true,errors:[]}]}));");
  }
  const store=new Store(path.join(dir,'service'));t.after(()=>store.close());
- const d=new Dispatcher(store,{enableRealCalls:false},()=>{throw Error('No model calls allowed');}),desktop=new Desktop(d);
+ const d=new Dispatcher(store,{maxConcurrent:2}),desktop=new Desktop(d);
  d.addProject({id:'p',workspace,mode:'desktop'});
  desktop.attach({workspace,role:'brain',clientId:'brain-client',token:'a'.repeat(64)});const identity=require('./stage-fixture.cjs').peers(desktop,'p').reviewer;
  store.change(s=>{s.projects.p.startup={state:'started'};});
@@ -22,7 +22,7 @@ async function review(t,withEvidence=false){
  if(withEvidence)d.configureValidation('p',{dependencies:'copy-node-modules',checks:[['run','check']],evidenceResult:'tmp/result.json'});
  d.pause('p',true);require('./stage-fixture.cjs').begin(d,'p');
  const a=d.createSnapshot(workspace);
- store.change(s=>Object.assign(s.projects.p.tasks.T,{state:'review_ready',artifactId:a.id,artifactHash:a.hash,changedFiles:[],attempts:[{id:'worker-0',role:'worker',settled:true,baselineId:a.id}]}));
+ store.change(s=>Object.assign(s.projects.p.tasks.T,{state:'review_ready',artifactId:a.id,artifactHash:a.hash,snapshotPolicy:a.policy,changedFiles:[],attempts:[{id:'worker-0',contractRevision:1,role:'worker',settled:true,baselineId:a.id}]}));
  await d.execute('p','T');d.pause('p',false);const job=desktop.claim(identity);d.pause('p',true);
  const result={projectId:'p',taskId:'T',attemptId:job.attemptId,role:'reviewer',artifactId:a.id,verdict:'pass',summary:'verified',findings:[]};
  return {dir,workspace,store,d,desktop,identity,job,result};
@@ -70,7 +70,7 @@ test('persistent contention exhausts bounded recovery and restart replays the sa
  assert.equal(JSON.stringify(x.store.state),before);assert.equal(JSON.stringify(JSON.parse(fs.readFileSync(x.store.file))),before);
  assert.equal(x.store.state.projects.p.tasks.T.attempts.length,count);
  t.mock.restoreAll();x.store.close();
- const restored=new Store(x.store.root);t.after(()=>restored.close());const resumed=new Dispatcher(restored,{enableRealCalls:false},()=>assert.fail('model restart'));
+ const restored=new Store(x.store.root);t.after(()=>restored.close());const resumed=new Dispatcher(restored,{maxConcurrent:2});
  resumed.recover();resumed.recover();assert.equal(restored.state.projects.p.tasks.T.state,'review_ready');
  assert.equal(restored.state.events.filter(e=>e.type==='review_decision').length,1);assert.equal(restored.state.projects.p.tasks.T.attempts.length,count);
 });
@@ -105,7 +105,7 @@ test('restart restores a missing post-commit alert but does not repeat an acknow
  const x=await review(t);failRename(t,x.store.file,n=>n>=2&&n<=5);
  x.desktop.submit(x.identity,{taskId:'T',attemptId:x.job.attemptId,result:{...x.result,verdict:'blocked',summary:'Missing prerequisite'}});
  t.mock.restoreAll();x.store.close();const store=new Store(x.store.root);t.after(()=>store.close());
- const d=new Dispatcher(store,{enableRealCalls:false},()=>assert.fail('model restart'));d.recover();
+ const d=new Dispatcher(store,{maxConcurrent:2});d.recover();
  assert.equal(store.state.projects.p.tasks.T.state,'blocked');assert.ok(store.state.projects.p.tasks.T.attention);
  store.change(s=>s.projects.p.tasks.T.attention.acknowledged=true);d.recover();
  assert.equal(store.state.events.filter(e=>e.type==='review_decision').length,1);assert.equal(store.state.events.filter(e=>e.type==='task_attention').length,1);

@@ -1,14 +1,15 @@
 'use strict';
+const {registerDesktop}=require('./service-fixture.cjs');
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const {initialize,request}=require('../runtime/wizard.cjs');
-const {serve}=require('../runtime/server.cjs');
+const {serve}=require('./service-fixture.cjs');
 const {call}=require('../runtime/desktop-client.cjs');
 test('manual startup gates dispatch, checks peers, persists and resets only on completed reopen',async()=>{
  const base=fs.mkdtempSync(path.resolve('tmp/startup-')),root=path.join(base,'service'),workspace=path.join(base,'work');
  fs.mkdirSync(workspace);initialize(root);let s=await serve(root);
  try{
-  const attach=role=>request(root,{action:'attach-desktop',workspace,role,clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
+  const attach=role=>registerDesktop(root,{workspace,role,clientId:crypto.randomUUID(),token:crypto.randomBytes(32).toString('hex')});
   const brain=await attach('brain'),task={id:'T',title:'test',instructions:'write README',acceptance:'correct',allowedPaths:['README.md']};
   const start=(extra={})=>call(root,brain,{action:'start-work',confirmed:true,...extra});
   assert.equal((await call(root,brain,{action:'status'})).startup.state,'waiting');
@@ -22,7 +23,7 @@ test('manual startup gates dispatch, checks peers, persists and resets only on c
   assert.equal((await call(root,worker,{action:'claim'})).job,null);
   assert.equal(s.store.state.projects[brain.projectId].turns,0);
   const reviewer=await attach('reviewer');await call(root,reviewer,{action:'heartbeat'});
-  s.store.change(st=>{st.projects[brain.projectId].bindings.worker.wake={provider:'codex',threadId:'test'};});
+  s.store.change(st=>{Object.assign(st.projects[brain.projectId].bindings.worker,{provider:'codex',sessionId:'test',wake:{provider:'codex',threadId:'test',turnId:'turn'}});});
   await assert.rejects(start(),/worker/);
   s.store.change(st=>{delete st.projects[brain.projectId].bindings.worker.wake;});
   assert.equal((await start()).startup.state,'started');

@@ -46,7 +46,7 @@ export function buildBoard(project = {}) {
 
 export function matchesTask(task, board, options = {}) {
   const query = (options.query || '').trim().toLocaleLowerCase();
-  const text = [task.id, task.title, task.stageId, task.workerId].join(' ').toLocaleLowerCase();
+  const text = [task.id, task.title, task.stageId, task.currentWorkerId].join(' ').toLocaleLowerCase();
   return (!query || text.includes(query)) && (!options.goal || task.goalId === options.goal) && (!options.stage || task.stageId === options.stage) &&
     (options.filter === 'active' ? !terminal(task) : options.filter === 'brain' ? !terminal(task) && board.reviews.get(task.id)?.key !== 'draft' : options.filter === 'attention' ? ['blocked','uncertain'].includes(task.state) : true);
 }
@@ -130,7 +130,7 @@ export function renderBoard(root, project, options, actions) {
     heading.append(el('small', id), el('strong', task.title)); heading.title = `${id} · ${task.title}`;
     heading.setAttribute('aria-label', `查看任务 ${id}：${task.title}`); item.append(heading);
     const badges = el('div', undefined, 'board-task-badges'); badges.append(pill(taskState(task), ['blocked','uncertain'].includes(task.state) ? 'danger' : terminal(task) ? 'passed' : ''), pill(review.text, 'brain ' + review.key)); item.append(badges);
-    item.append(el('small', `${task.stageId || '未登记阶段'} · 执行员 ${task.workerId || 'default'}`, 'board-task-meta'));
+    item.append(el('small', `${task.stageId || '未登记阶段'} · 执行员 ${task.currentWorkerId || 'default'}`, 'board-task-meta'));
     if (graph) { const deps = el('small', '前置：' + ((task.dependsOn || []).join('、') || '无'), 'board-task-meta'); deps.title = deps.textContent; item.append(deps); }
     if (!graph) {
       const deps = el('div', undefined, 'board-dependencies'); deps.append(el('span', '前置：'));

@@ -150,9 +150,6 @@ function install({ platforms, home = os.homedir(), dryRun = false, root = ROOT }
   const source = path.join(root, 'skills', 'task-dispatch');
   const version = JSON.parse(fs.readFileSync(path.join(root, '.codex-plugin/plugin.json'), 'utf8')).version;
   // [AI-added] 2026-09-14 09:43
-/* Previous implementation:
-const payload = Object.fromEntries(files(source).map(f => [f, fs.readFileSync(path.join(source, f))]));
-*/
 const sharedPayload = Object.fromEntries(files(source).map(f => [f, fs.readFileSync(path.join(source, f))]));
   // [AI-added] 2026-09-14 17:19
   if (ids.includes('mimo')) validateYamlSkill(sharedPayload['SKILL.md']);
@@ -168,9 +165,6 @@ const sharedPayload = Object.fromEntries(files(source).map(f => [f, fs.readFileS
   const plans = ids.map(id => {
     const payload = { ...sharedPayload };
     // [AI-added] 2026-09-16 16:00
-    // Qoder wake delivery uses the app bridge. Only the prompt-time invitation
-    // handshake is installed; the retired Stop polling hook must stay absent.
-    if (['qoder', 'qodercn'].includes(id)) delete payload['qoder-hook.cjs'];
     const base = path.resolve(home);
     const target = path.resolve(base, PLATFORMS[id], 'task-dispatch');
     if (!inside(base, target)) throw Error('Invalid target: ' + target);
@@ -181,9 +175,6 @@ const sharedPayload = Object.fromEntries(files(source).map(f => [f, fs.readFileS
     const writes = [], deletes = [];
     for (const [f, data] of Object.entries(payload)) {
       // [AI-added] 2026-09-14 09:43
-/* Previous implementation:
-const dest = path.join(target, f);
-*/
 const dest = path.join(target, f);
       if (!inside(base, dest)) throw Error('Invalid installation path');
       noLinks(dest);
@@ -204,6 +195,8 @@ const dest = path.join(target, f);
     const hooks = ['qoder', 'qodercn'].includes(id) ? planQoderSettings({ id, base, target, previous, writes }) : null;
     const bridge = ['qoder', 'qodercn'].includes(id) ? planQoderBridge({ id, base, root, previous, writes, deletes }) : null;
     // [AI-added] 2026-09-14 09:43
+    const receiptData=Buffer.from(JSON.stringify({name:'task-dispatch',version,hashes:Object.fromEntries(Object.entries(payload).map(([f,d])=>[f,hash(d)])),...(hooks?{hooks}:{}),...(bridge?{bridge}:{})},null,2)+'\n');
+    if(!fs.existsSync(receipt)||!fs.readFileSync(receipt).equals(receiptData))writes.push([receipt,receiptData]);
     return { id, target, receipt, writes, deletes, payload, hooks, bridge };
   });
   // Preflight all selected platforms before writing any files.
@@ -215,9 +208,6 @@ const dest = path.join(target, f);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, data);
     }
-    fs.mkdirSync(plan.target, { recursive: true });
-    // [AI-added] 2026-09-15 19:05
-    fs.writeFileSync(plan.receipt, JSON.stringify({ name: 'task-dispatch', version, hashes: Object.fromEntries(Object.entries(plan.payload).map(([f, d]) => [f, hash(d)])), ...(plan.hooks ? { hooks: plan.hooks } : {}), ...(plan.bridge ? { bridge: plan.bridge } : {}) }, null, 2) + '\n');
   }
   return plans;
 }

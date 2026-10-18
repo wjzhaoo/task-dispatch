@@ -11,19 +11,26 @@ const PLANNING_CLAIM_GRACE_MS=60_000;
 const TASK_CLAIM_GRACE_MS=60_000;
 // [AI-added] 2026-09-21 23:41: A completed host repair makes the interrupted send safely
 // retryable on the next marker-reconciliation tick; an unperformed repair does not.
-function repairMessage(error,repair){return error.message+(repair?.note?'; '+repair.note:'');}
+function repairMessage(error,repair){return [error.message,error.wakeHint,repair?.note].filter(Boolean).join('; ');}
 function sendFailure(error,repair){return {status:(error.safeToRetry||repair?.attempted)?'pending':'uncertain',error:repairMessage(error,repair)};}
 class Wake {
-  constructor(desktop,adapter) { this.desktop=desktop;this.store=desktop.store;this.adapter=adapter;this.busy=null;this.stopped=false;this.next=0;this.readTimeoutMs=15000;this.sendTimeoutMs=30000; }
-  forProvider(provider='codex') {
+  constructor(desktop,adapter) { this.desktop=desktop;this.store=desktop.store;this.adapter=adapter;this.busy=null;this.stopped=false;this.next=0;this.readTimeoutMs=15000;this.sendTimeoutMs=30000;
+    // Persisted wake bindings are unverified until the first bounded host read after restart.
+    // Waiting for that read must not turn a healthy collecting stage into a permanent block.
+    if(desktop.d&&this.store.state?.projects)desktop.d.reviewerChecks = new Map(Object.values(this.store.state.projects)
+      .filter(p=>p.bindings?.reviewer?.wake&&!require('./pre-review.cjs').online(desktop.d,p))
+      .map(p=>[p.id,p.bindings.reviewer.clientId]));
+  }
+  forProvider(provider) {
+    if (!provider) throw Error('Wake provider is required');
     if (this.adapter.forProvider) return this.adapter.forProvider(provider);
     if (provider !== 'codex') throw Error('Wake provider not connected: '+provider);
     return this.adapter;
   }
   send(adapter,binding,message,timeoutMs=this.sendTimeoutMs) {
-    if(binding.provider!=='opencode')return hostCall.send(adapter,binding,message,timeoutMs);
-    // OpenCode performs another async database read before spawning the CLI.
-    // Recheck the authorization and pending notice after that read as well.
+    if(!['opencode','codearts','dsh'].includes(binding.provider))return hostCall.send(adapter,binding,message,timeoutMs);
+    // These adapters perform async reads before delivery. Recheck the binding
+    // and pending notice after those reads as well.
     const expected=JSON.stringify(binding);
     const canSend=()=>{
       if(this.stopped)return false;
@@ -43,46 +50,53 @@ class Wake {
     };
     return hostCall.send(adapter,{...binding,canSend},message,timeoutMs);
   }
-  // [AI-added] 2026-09-24 13:26: Verified host data may be reused by the continuation path only.
-  async bind(identity,input,verifiedInfo) {
-    this.desktop.assertBinding(identity);
-    const p=this.store.state.projects[identity.projectId], b=p.bindings[bindingKey(identity)];
-    if (input.enabled === false) { this.store.change(s=>{const q=s.projects[p.id].bindings[bindingKey(identity)];q.wake=null;q.armed=false;delete q.armedAt;});return {ok:true}; }
-    if (input.experimentalAcknowledged!==true) throw Error('Private Desktop protocol requires explicit acknowledgement');
-    // [AI-added] 2026-09-15 18:56
-    // [AI-added] 2026-09-14 09:43
-/* Previous implementation:
-const provider=input.provider || 'codex', adapter=this.forProvider(provider);
-*/
-/* Previous implementation:
-const provider=input.provider === 'codeartsdoer' ? 'codearts' : input.provider || 'codex', adapter=this.forProvider(provider);
-*/
-if(!input.provider)throw Error('wake-bind requires explicit provider');
-const provider=assertRoleProvider(identity.role,input.provider), adapter=this.forProvider(provider);
-    for (const k of provider==='codex'?['threadId','turnId']:['threadId']) if(typeof input[k]!=='string'||!input[k].trim())throw Error(k+' required');
-    if(b.sessionId && b.sessionId!==input.threadId)throw Error('Wake thread differs from connected session');
-    if(b.wake&&((b.wake.provider||'codex')!==provider||b.wake.threadId!==input.threadId||b.wake.turnId!==input.turnId))throw Error('Disable old wake binding before replacing it');
-    for(const project of Object.values(this.store.state.projects))for(const [role,binding]of Object.entries(project.bindings||{}))if((binding.wake?.provider||'codex')===provider&&binding.wake?.threadId===input.threadId&&(project.id!==p.id||role!==bindingKey(identity)))throw Error('Desktop thread already bound to another project/role');
+  configuration({role,workspace,sessionId}, input) {
+    const provider = assertRoleProvider(role, input.provider);
+    if (!provider) throw Error('Wake binding requires explicit provider');
+    for (const key of provider === 'codex' ? ['threadId','turnId'] : ['threadId']) if (typeof input[key] !== 'string' || !input[key].trim()) throw Error(key + ' required');
+    if (sessionId && sessionId !== input.threadId) throw Error('Wake thread differs from connected session');
     if (provider === 'mimo' && (typeof input.model !== 'string' || !/^[^\s/]+\/[^\s]+$/.test(input.model))) throw Error('MiMo requires explicit provider/model');
-    if (provider === 'codearts' && input.model !== undefined && (typeof input.model !== 'string' || !/^[^\s/]+\/\S+$/.test(input.model))) throw Error('CodeArts model must be provider/model; omit it to preserve the session model');
-    // [AI-added] 2026-09-15 18:56
-    if (provider === 'qoder' && input.model !== undefined && (typeof input.model !== 'string' || !/^[^\s/]+\/\S+$/.test(input.model))) throw Error('Qoder model must be provider/model; omit it to preserve the session model');
-    if (provider === 'opencode' && input.model !== undefined && (typeof input.model !== 'string' || !/^[^\s/]+\/\S+$/.test(input.model))) throw Error('OpenCode model must be provider/model; omit it to preserve the session model');
-    if (b.wake?.model && b.wake.model !== input.model) throw Error('Disable old wake binding before replacing model');
-    const candidate={provider,threadId:input.threadId,...(input.turnId?{turnId:input.turnId}:{}),...(input.model?{model:input.model}:{}),...(['qoder','opencode'].includes(provider)?{workspace:p.workspace}:{})};
-    // Previous implementation: const r=await hostCall.read(adapter,candidate,this.readTimeoutMs);
-    // [AI-added] 2026-09-24 13:26: Direct wake-bind still performs its own host read.
-    const r=verifiedInfo || await (provider==='opencode' ? hostCall.bounded('Host verify',()=>adapter.verify(candidate),this.readTimeoutMs) : hostCall.read(adapter,candidate,this.readTimeoutMs));
-    if(r.thread?.id!==candidate.threadId||!r.thread.cwd||path.relative(p.workspace,r.thread.cwd)!=='')throw Error('Desktop thread workspace does not match project');
-    this.desktop.assertBinding(identity);
-    this.store.change(s=>{const q=s.projects[p.id].bindings[bindingKey(identity)];q.wake=candidate;q.armed=false;delete q.armedAt;});
-    return {ok:true,message:'Bound. Use park after work; do not keep a wait process running.'};
+    if (['qoder','opencode','codearts'].includes(provider) && input.model !== undefined && (typeof input.model !== 'string' || !/^[^\s/]+\/\S+$/.test(input.model))) throw Error(provider + ' model must be provider/model; omit it to preserve the session model');
+    if (provider === 'dsh' && input.model !== undefined) throw Error('DSH wake preserves the session model; omit --model');
+    if (provider==='qoder' && input.descriptorPath!==undefined && (typeof input.descriptorPath!=='string' || !path.isAbsolute(input.descriptorPath) || path.basename(input.descriptorPath)!=='task-dispatch-bridge.json')) throw Error('Invalid Qoder bridge descriptor path');
+    return {provider,threadId:input.threadId,...(provider==='qoder'&&input.descriptorPath?{descriptorPath:path.resolve(input.descriptorPath)}:{}),...(input.turnId ? {turnId:input.turnId} : {}),...(input.model ? {model:input.model} : {}),...(['qoder','opencode','codearts','dsh'].includes(provider) ? {workspace} : {})};
   }
-  park(identity) {
+  candidate(identity, input) {
+    const b = this.desktop.assertBinding(identity), p = this.store.state.projects[identity.projectId];
+    const candidate = this.configuration({...identity,workspace:p.workspace,sessionId:b.sessionId}, input);
+    if (b.wake && (b.wake.provider !== candidate.provider || b.wake.threadId !== candidate.threadId || b.wake.turnId !== candidate.turnId)) throw Error('Use rebind to replace the connected session');
+    for (const project of Object.values(this.store.state.projects)) for (const [key,binding] of Object.entries(project.bindings || {})) if (binding.wake?.provider === candidate.provider && binding.wake.threadId === candidate.threadId && (project.id !== p.id || key !== bindingKey(identity))) throw Error('Desktop thread already bound to another project/role');
+    if (b.wake?.model && b.wake.model !== candidate.model) throw Error('Use rebind to replace the configured model');
+    return candidate;
+  }
+  async verify(candidate, workspace) {
+    const adapter = this.forProvider(candidate.provider);
+    const info = await hostCall.bounded('Host verify', () => typeof adapter.verify === 'function' ? adapter.verify(candidate) : adapter.read(candidate), this.readTimeoutMs);
+    if (info.thread?.id !== candidate.threadId) throw Error('Session identity mismatch: expected '+candidate.threadId+', got '+info.thread?.id);
+    if (!info.thread.cwd || path.relative(workspace, info.thread.cwd) !== '') throw Error('Session workspace mismatch: expected '+workspace+', got '+info.thread.cwd);
+    return info;
+  }
+  apply(identity, input) {
+    const candidate = this.candidate(identity, input), b = this.desktop.assertBinding(identity);
+    if (JSON.stringify(b.wake) === JSON.stringify(candidate) && b.provider === candidate.provider && !b.continuationError) return;
+    this.store.change(s => {
+      const q = s.projects[identity.projectId].bindings[bindingKey(identity)];
+      q.provider = candidate.provider; q.sessionId = candidate.threadId; q.wake = candidate;
+      delete q.continuationError;
+    });
+  }
+  async bind(identity, input) {
+    this.desktop.assertBinding(identity);
+    const candidate = this.candidate(identity, input), p = this.store.state.projects[identity.projectId];
+    await this.verify(candidate, p.workspace);
+    this.apply(identity, candidate);
+    return {ok:true};
+  }
+  park(identity, { dispatch = true } = {}) {
     const completed=this.desktop.completion(identity);if(completed)return completed;
     const b=this.store.state.projects[identity.projectId].bindings[bindingKey(identity)];
     if(!b.wake)throw Error('Wake is not configured');
-    const job=this.desktop.claim(identity);
+    const job=this.desktop.claim(identity, {dispatch});
     if(job){
       if(job.kind==='planning')this.store.change(s=>{
         const q=s.projects[identity.projectId].planning;
@@ -91,7 +105,7 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
       });
       return {job,...(job.kind==='planning'?{parked:false,needsAttention:!!this.store.state.projects[identity.projectId].planning.needsAttention}:{})};
     }
-    this.store.change(s=>{const q=s.projects[identity.projectId].bindings[bindingKey(identity)];q.armed=true;q.armedAt=new Date().toISOString();});
+    if (!b.armed) this.store.change(s=>{const q=s.projects[identity.projectId].bindings[bindingKey(identity)];q.armed=true;q.armedAt=new Date().toISOString();});
     return {parked:true,planningBlock:this.store.state.projects[identity.projectId].planning?.resolution||null,message:'End this model turn. The service will notify this thread when work arrives. Do not poll or call wait.'};
   }
   tick() {
@@ -118,16 +132,18 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
   async run() {
     for(const p of Object.values(this.store.state.projects)) {
       if(p.paused||p.completedAt||p.mode!=='desktop')continue;
+      require('./brain-attention.cjs').reconcile(this.desktop.d,p.id);
       const reviewer=p.bindings?.reviewer;
       if(reviewer?.wake) {
         try {
-          const info=await hostCall.read(this.forProvider(reviewer.wake.provider||'codex'),reviewer.wake,this.readTimeoutMs);
+          const info=await hostCall.read(this.forProvider(reviewer.wake.provider),reviewer.wake,this.readTimeoutMs);
           if(info.thread?.id===reviewer.wake.threadId && info.thread.cwd && path.relative(p.workspace,info.thread.cwd)==='' &&
               (['idle','active','busy','running'].includes(info.thread?.status?.type) || info.thread.reachable===true)) {
             if(this.store.state.projects[p.id].bindings?.reviewer?.clientId===reviewer.clientId)
               require('./pre-review.cjs').touch(this.desktop.d,{projectId:p.id,role:'reviewer',clientId:reviewer.clientId});
           }
         } catch { /* A stale wake binding is not proof of presence. */ }
+        finally { if(this.desktop.d.reviewerChecks?.get(p.id)===reviewer.clientId)this.desktop.d.reviewerChecks.delete(p.id); }
       }
       if(require('./startup.cjs').waiting(p))continue;
       require('./planning.cjs').reconcile(this.store,p.id);
@@ -162,7 +178,7 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
         }
         if(notice.status==='sent'&&!followup)continue;
         let info, adapter;
-        try { adapter=this.forProvider(b.wake.provider||'codex'); info=await hostCall.read(adapter,b.wake,this.readTimeoutMs); }
+        try { adapter=this.forProvider(b.wake.provider); info=await hostCall.read(adapter,b.wake,this.readTimeoutMs); }
         // [AI-added] 2026-09-20: restartable host failures get one rate-limited auto-repair
         // (start/restart the app) and the outcome rides along in the visible error.
         catch(e){const repair=await this.repair(adapter,e,{projectId:p.id,taskId:t.id});update({error:repairMessage(e,repair)});continue;}
@@ -191,7 +207,7 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
         const found=(info.turns||[]).some(turn=>(turn.items||[]).some(item=>item.type==='userMessage'&&(item.content||[]).some(c=>typeof c.text==='string'&&c.text.includes(marker))));
         if (found) { update({status:'sent',marker,error:null}); continue; }
         if(['sending','uncertain'].includes(r.wakeNotice?.status)) {
-          update(found?{status:'sent',error:null}:{status:'uncertain',error:'Delivery uncertain; no automatic resend. Check target conversation; manually claim/park if needed.'});continue;
+          update(found?{status:'sent',error:null}:{status:'uncertain',error:r.wakeNotice.error||'Delivery uncertain; no automatic resend. Check target conversation; manually claim/park if needed.'});continue;
         }
         // MiMo may not emit an initial SSE state. A parked binding authorizes sending;
         // its HTTP busy rejection is definitive and safe to retry. Never infer idle.
@@ -202,7 +218,7 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
         update({status:'sending',marker,at:new Date().toISOString(),error:null});
         try {
           // [AI-added] 2026-09-14 22:59
-          if((b.wake.provider||'codex')==='codex')await this.send(adapter,b.wake,`[${marker}] task-dispatch 有待处理任务。项目 ${p.id}，任务 ${t.id}，角色 ${r.role}。请用本会话已有凭据执行 desktop-client claim 领取正式任务，处理并 submit；之后 park，无任务时结束回合。不要轮询、调用 wait 或直接读取 state.json。通知不等于任务已领取，先核对 claim 返回的 attemptId。`,this.sendTimeoutMs);
+          if((b.wake.provider)==='codex')await this.send(adapter,b.wake,`[${marker}] task-dispatch 有待处理任务。项目 ${p.id}，任务 ${t.id}，角色 ${r.role}。请用本会话已有凭据执行 desktop-client claim 领取正式任务，处理并 submit；之后 park，无任务时结束回合。不要轮询、调用 wait 或直接读取 state.json。通知不等于任务已领取，先核对 claim 返回的 attemptId。`,this.sendTimeoutMs);
           else
           // [AI-added] 2026-09-14 22:06
           await this.send(adapter,b.wake,`[${marker}] task-dispatch 有待处理任务。项目 ${p.id}，任务 ${t.id}，角色 ${r.role}。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 desktop-client claim 领取正式任务；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。处理并 submit；之后 park，无任务时结束回合。不要轮询、调用 wait 或直接读取 state.json。通知不等于任务已领取，先核对 claim 返回的 attemptId。`,this.sendTimeoutMs);
@@ -219,11 +235,11 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
     // [AI-added] 2026-09-14 22:06
     if(q.wakeNotice?.status==='sent'){
       // [AI-added] 2026-09-14 22:59
-      if((b.wake.provider||'codex')==='codex')return;
+      if((b.wake.provider)==='codex')return;
       const sentAt=Date.parse(q.wakeNotice.at);
       if(!Number.isFinite(sentAt)||Date.now()-sentAt<PLANNING_CLAIM_GRACE_MS)return;
       let info;
-      try{info=await hostCall.read(this.forProvider(b.wake.provider||'codex'),b.wake,this.readTimeoutMs);}catch(e){update({error:e.message});return;}
+      try{info=await hostCall.read(this.forProvider(b.wake.provider),b.wake,this.readTimeoutMs);}catch(e){update({error:e.message});return;}
       if(info.thread?.status?.type!=='idle')return;
       this.store.change(s=>{
         const current=s.projects[projectId],planning=current?.planning,binding=current?.bindings?.brain;
@@ -235,10 +251,10 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
       return;
     }
     let adapter,info;
-    try{adapter=this.forProvider(b.wake.provider||'codex');info=await hostCall.read(adapter,b.wake,this.readTimeoutMs);}catch(e){const repair=await this.repair(adapter,e,{projectId});update({error:repairMessage(e,repair)});return;}
+    try{adapter=this.forProvider(b.wake.provider);info=await hostCall.read(adapter,b.wake,this.readTimeoutMs);}catch(e){const repair=await this.repair(adapter,e,{projectId});update({error:repairMessage(e,repair)});return;}
     const found=(info.turns||[]).some(t=>(t.items||[]).some(i=>i.type==='userMessage'&&(i.content||[]).some(c=>c.text?.includes(marker))));
     if(found){update({status:'sent',marker,error:null});return;}
-    if(['sending','uncertain'].includes(q.wakeNotice?.status)){update({status:'uncertain',error:'阶段收尾通知送达不确定，请人工检查；不自动重发。'});return;}
+    if(['sending','uncertain'].includes(q.wakeNotice?.status)){update({status:'uncertain',error:q.wakeNotice?.error||'阶段收尾通知送达不确定，请人工检查；不自动重发。'});return;}
     if(info.thread?.status?.type!=='idle'&&!((b.wake.provider==='mimo')&&info.thread?.status?.type==='unknown'))return;
     const current=this.store.state.projects[projectId];
     if(this.stopped||current.paused||current.completedAt||current.planning?.id!==q.id||current.planning.state!=='pending'||!current.bindings?.brain?.armed||JSON.stringify(current.bindings.brain.wake)!==JSON.stringify(b.wake)||Object.values(current.tasks).some(t=>['running','reviewing','uncertain'].includes(t.state)))return;
@@ -250,7 +266,7 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
         update({status:'sent',error:null}); return;
       }
       // [AI-added] 2026-09-14 22:59
-      if((b.wake.provider||'codex')==='codex')await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} ${obligation}。请用已有凭据 claim，按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
+      if((b.wake.provider)==='codex')await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} ${obligation}。请用已有凭据 claim，按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
       else
       // [AI-added] 2026-09-14 22:06
       await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} ${obligation}。必须立即调用终端/命令工具，原样复用本会话已有的客户端、credential 和 data 路径，实际执行 claim；不得只展示、复述或建议命令，不得凭记忆重写路径。若宿主无法调用终端，明确报告阻塞。领取后按 kind=planning 的要求同步计划并登记已授权后续任务，或记录具体阻塞，再实际执行 closeout。空队列不代表项目完成；不要直接 park。`,this.sendTimeoutMs);
@@ -265,16 +281,16 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
     const marker='TASK-DISPATCH-SCOPE:'+q.id;
     const update=value=>this.store.change(s=>{const a=s.projects[projectId].tasks[job.taskId].scopeAlert;if(a?.id===q.id)a.wakeNotice={...a.wakeNotice,...value};});
     let adapter,info;
-    try{adapter=this.forProvider(b.wake.provider||'codex');info=await hostCall.read(adapter,b.wake,this.readTimeoutMs);}catch(e){const repair=await this.repair(adapter,e,{projectId});update({error:repairMessage(e,repair)});return;}
+    try{adapter=this.forProvider(b.wake.provider);info=await hostCall.read(adapter,b.wake,this.readTimeoutMs);}catch(e){const repair=await this.repair(adapter,e,{projectId});update({error:repairMessage(e,repair)});return;}
     const found=(info.turns||[]).some(t=>(t.items||[]).some(i=>i.type==='userMessage'&&(i.content||[]).some(c=>c.text?.includes(marker))));
     if(found){update({status:'sent',marker,error:null});return;}
-    if(['sending','uncertain'].includes(q.wakeNotice?.status)){update({status:'uncertain',error:'越界阻塞通知送达不确定，不自动重发。'});return;}
+    if(['sending','uncertain'].includes(q.wakeNotice?.status)){update({status:'uncertain',error:q.wakeNotice?.error||'越界阻塞通知送达不确定，不自动重发。'});return;}
     if(info.thread?.status?.type!=='idle'&&!((b.wake.provider==='mimo')&&info.thread?.status?.type==='unknown'))return;
     const current=this.store.state.projects[projectId],a=current.tasks[job.taskId].scopeAlert;
     if(this.stopped||current.paused||current.completedAt||a?.id!==q.id||a.acknowledged||!current.bindings?.brain?.armed||JSON.stringify(current.bindings.brain.wake)!==JSON.stringify(b.wake))return;
     update({status:'sending',marker,at:new Date().toISOString()});
     // [AI-added] 2026-09-14 22:59
-    if((b.wake.provider||'codex')==='codex'){
+    if((b.wake.provider)==='codex'){
       try{await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 的任务 ${job.taskId} 越界纠正需要大脑处理。请用已有凭据 claim 读取 scope_attention，核对差异并说明阻塞后 scope-ack；不要扩大 worker 修改计划的权限。`,this.sendTimeoutMs);update({status:'sent',error:null});}
       catch(e){const repair=await this.repair(adapter,e,{projectId});update(sendFailure(e,repair));}
       return;
@@ -293,16 +309,16 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
     const marker='TASK-DISPATCH-ATTENTION:'+q.id;
     const update=value=>this.store.change(s=>{const a=s.projects[projectId].tasks[job.taskId].attention;if(a?.id===q.id)a.wakeNotice={...a.wakeNotice,...value};});
     let adapter,info;
-    try{adapter=this.forProvider(b.wake.provider||'codex');info=await hostCall.read(adapter,b.wake,this.readTimeoutMs);}catch(e){const repair=await this.repair(adapter,e,{projectId});update({error:repairMessage(e,repair)});return;}
+    try{adapter=this.forProvider(b.wake.provider);info=await hostCall.read(adapter,b.wake,this.readTimeoutMs);}catch(e){const repair=await this.repair(adapter,e,{projectId});update({error:repairMessage(e,repair)});return;}
     const found=(info.turns||[]).some(t=>(t.items||[]).some(i=>i.type==='userMessage'&&(i.content||[]).some(c=>c.text?.includes(marker))));
     if(found){update({status:'sent',marker,error:null});return;}
-    if(['sending','uncertain'].includes(q.wakeNotice?.status)){update({status:'uncertain',error:'任务阻塞通知送达不确定，不自动重发。'});return;}
+    if(['sending','uncertain'].includes(q.wakeNotice?.status)){update({status:'uncertain',error:q.wakeNotice?.error||'任务阻塞通知送达不确定，不自动重发。'});return;}
     if(info.thread?.status?.type!=='idle'&&!((b.wake.provider==='mimo')&&info.thread?.status?.type==='unknown'))return;
     const current=this.store.state.projects[projectId],a=current.tasks[job.taskId].attention;
     if(this.stopped||current.paused||current.completedAt||a?.id!==q.id||a.acknowledged||!current.bindings?.brain?.armed||JSON.stringify(current.bindings.brain.wake)!==JSON.stringify(b.wake))return;
     update({status:'sending',marker,at:new Date().toISOString()});
     // [AI-added] 2026-09-14 22:59
-    if((b.wake.provider||'codex')==='codex'){
+    if((b.wake.provider)==='codex'){
       try{await this.send(adapter,b.wake,`[${marker}] 项目 ${projectId} 的任务 ${job.taskId} 处于 ${q.kind} 状态，需要大脑处理。请用已有凭据 claim 读取 task_attention，核对状态并向用户说明阻塞原因，处置后执行 attention-ack；原因未核实前不要盲目重试。`,this.sendTimeoutMs);update({status:'sent',error:null});}
       catch(e){const repair=await this.repair(adapter,e,{projectId});update(sendFailure(e,repair));}
       return;
@@ -320,11 +336,11 @@ const provider=assertRoleProvider(identity.role,input.provider), adapter=this.fo
     const current=()=>{const q=this.store.state.projects[projectId],j=q&&require('./stage-review.cjs').job(q);return !this.stopped&&!q?.paused&&!q?.completedAt&&q?.bindings?.brain?.armed&&q.bindings.brain.clientId===binding.clientId&&JSON.stringify(q.bindings.brain.wake)===JSON.stringify(binding.wake)&&j?.roundId===job.roundId&&(j.attemptId||j.alertId)===(job.attemptId||job.alertId)&&!(job.kind==='stage_review'&&q.reviewStages[job.roundId].attempt?.claimedBy);};
     const update=value=>this.store.change(s=>{const b=s.projects[projectId]?.reviewStages?.[job.roundId];if(b&&!require('./stage-review.cjs').ended(b)){const previous=b.wakeNotice?.marker===marker?b.wakeNotice:{};b.wakeNotice={...previous,marker,...value};}});
     if(notice.status==='sent'){if(Date.now()-Date.parse(notice.at)>TASK_CLAIM_GRACE_MS&&!notice.error)update({claimStatus:'stalled',error:'批次通知已送达但仍未领取，请核对会话；不会自动重复审核或换人。'});return;}
-    let adapter,info;try{adapter=this.forProvider(binding.wake.provider||'codex');info=await hostCall.read(adapter,binding.wake,this.readTimeoutMs);}catch(e){update({error:e.message});return;}
+    let adapter,info;try{adapter=this.forProvider(binding.wake.provider);info=await hostCall.read(adapter,binding.wake,this.readTimeoutMs);}catch(e){update({error:e.message});return;}
     if(!current())return;
     const found=(info.turns||[]).some(t=>(t.items||[]).some(i=>i.type==='userMessage'&&(i.content||[]).some(c=>c.text?.includes(marker))));
     if(found){update({status:'sent',at:notice.at||new Date().toISOString(),error:null});return;}
-    if(['sending','uncertain'].includes(notice.status)){update({status:'uncertain',error:'批次通知送达不确定，请核对目标会话；不自动重发。'});return;}
+    if(['sending','uncertain'].includes(notice.status)){update({status:'uncertain',error:notice.error||'批次通知送达不确定，请核对目标会话；不自动重发。'});return;}
     if(info.thread?.status?.type!=='idle'&&!(binding.wake.provider==='mimo'&&info.thread?.status?.type==='unknown'))return;
     update({status:'sending',at:new Date().toISOString()});
     try{await this.send(adapter,binding.wake,`[${marker}] 项目 ${projectId} 有 ${job.kind} 待办。立即调用终端工具，复用已有客户端、credential 和 data 路径实际执行 claim，并完成批次逐项审核或阻塞处置。不要仅展示命令；领取后按返回指令提交并 park。`,this.sendTimeoutMs);update({status:'sent',error:null});}catch(e){update(sendFailure(e,null));}

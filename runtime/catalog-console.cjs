@@ -15,10 +15,10 @@ function cookie(req) { return (req.headers.cookie||'').split(';').map(value=>val
 // [AI-added] 2026-09-21: Stopping a service affects every project sharing that data root, so the
 // home page guard reads the whole state file instead of the single card's workspace.
 function serviceFacts(dataRoot) {
-  const facts = { inFlight: 0, unclaimed: 0, headlessRunning: false };
+  const facts = { inFlight: 0, unclaimed: 0 };
   let state; try { state = registry.stateAt(dataRoot); } catch { return facts; }
   for (const project of Object.values(state?.projects || {})) for (const task of Object.values(project?.tasks || {})) {
-    if (['running', 'reviewing'].includes(task.state)) { facts.inFlight++; if (project.mode !== 'desktop') facts.headlessRunning = true; }
+    if (['running', 'reviewing'].includes(task.state)) facts.inFlight++;
     const attempt = task.attempts?.at(-1);
     if (attempt?.claimedBy && !attempt.settled) facts.unclaimed++;
   }
@@ -42,26 +42,12 @@ function projectView(options = {}) {
   });
 }
 // [AI-added] 2026-09-19 00:35
-// Deprecated: the cross-port admin redirect was replaced by the same-origin
-// gateway routes /catalog/api/p/<key>/* below. Kept for reference only.
-// async function openProject(key, options = {}) {
-//   const entry=registry.catalog(options).find(item=>item.key===key);
-//   if(!entry)throw Error('项目不在系统目录清单中，请刷新');
-//   if(!entry.workspaceExists)throw Error('项目工作目录已不存在，请核对项目位置');
-//   if(!entry.dataExists)throw Error('项目服务目录不可用，请先迁移或重新接入项目');
-//   if(!await wizard.online(entry.dataRoot))await wizard.start(entry.dataRoot);
-//   const endpoint=JSON.parse(fs.readFileSync(path.join(entry.dataRoot,'endpoint.json'),'utf8')),target=`http://127.0.0.1:${endpoint.port}`;
-//   const response=await fetch(target+'/admin/ticket',{method:'POST',headers:{Authorization:'Bearer '+fs.readFileSync(path.join(entry.dataRoot,'admin-token'),'utf8').trim()},signal:AbortSignal.timeout(5000)});
-//   let result; try { result=JSON.parse(await response.text()); } catch { throw Error('目标项目服务尚未支持 Web 管理台，请在安全边界重启该项目服务'); }
-//   if(!response.ok||typeof result.url!=='string')throw Error(result.error||'目标项目管理台不可用');
-//   return {url:result.url};
-// }
 // [AI-added] 2026-09-19 00:35
 function catalogEntry(key, options = {}) {
   const entry = registry.catalog(options).find(item => item.key === key);
   if (!entry) throw Error('项目不在系统目录清单中，请返回主页刷新');
   if (!entry.workspaceExists) throw Error('项目工作目录已不存在，请核对项目位置');
-  if (!entry.dataExists) throw Error('项目服务目录不可用，请先迁移或重新接入项目');
+  if (!entry.dataExists) throw Error('项目服务目录不可用，请核对目录位置或重新接入项目');
   return entry;
 }
 // [AI-added] 2026-09-19 00:35
@@ -74,8 +60,8 @@ async function gatewayLogin(entry) {
   const token = fs.readFileSync(path.join(entry.dataRoot, 'admin-token'), 'utf8').trim();
   const ticketResponse = await fetch(base + '/admin/ticket', { method: 'POST', headers: { Authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(5000) });
   let ticketResult; try { ticketResult = JSON.parse(await ticketResponse.text()); } catch { throw Error('目标项目服务尚未支持 Web 管理台，请在安全边界重启该项目服务'); }
-  if (!ticketResponse.ok || typeof ticketResult.url !== 'string') throw Error(ticketResult.error || '目标项目服务尚未支持 Web 管理台，请在安全边界重启该项目服务');
-  const ticket = new URL(ticketResult.url).hash.slice('#ticket='.length);
+  if (!ticketResponse.ok || typeof ticketResult.ticket !== 'string') throw Error(ticketResult.error || '目标项目服务尚未支持 Web 管理台，请在安全边界重启该项目服务');
+  const ticket = ticketResult.ticket;
   const loginResponse = await fetch(base + '/admin/login', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: base }, body: JSON.stringify({ ticket }), signal: AbortSignal.timeout(5000) });
   const loginResult = await loginResponse.json().catch(() => ({}));
   if (!loginResponse.ok || !loginResult.csrf) throw Error(loginResult.error || '目标项目登录失败');
@@ -83,22 +69,15 @@ async function gatewayLogin(entry) {
   if (!cookie.startsWith('td_admin=')) throw Error('目标项目登录失败：未返回会话');
   return { base, cookie, csrf: loginResult.csrf, expiresAt: Date.now() + 7.5 * 3600000 };
 }
-// [AI-added] 2026-09-17 19:20
-// Previous implementation: AppData/Local/task-dispatch/console.json was the default.
-// [AI-added] 2026-09-24 13:25: Keep console discovery with the home metadata index.
 function consoleFile(home) { return path.join(registry.systemIndexRoot(home), 'console.json'); }
-function legacyConsoleFile(cacheRoot) { return path.join(path.resolve(cacheRoot || registry.systemCacheRoot()), 'task-dispatch', 'console.json'); }
-// [AI-added] 2026-09-24 13:25: An already running old console remains reachable during the index transition.
-async function reuse({ stateFile, home, cacheRoot } = {}) {
-  for (const candidate of stateFile ? [stateFile] : [consoleFile(home), legacyConsoleFile(cacheRoot)]) {
-    let state; try { state = read(candidate); } catch { continue; }
-    if (!state || !Number.isInteger(state.port) || typeof state.token !== 'string' || !alive(state.pid)) continue;
-    try {
-      const response = await fetch(`http://127.0.0.1:${state.port}/catalog/ticket`, { method: 'POST', headers: { Authorization: 'Bearer ' + state.token }, signal: AbortSignal.timeout(5000) });
-      if (!response.ok) continue;
-      const { url } = await response.json(); if (typeof url === 'string') return url;
-    } catch { /* Try the next known console record. */ }
-  }
+async function reuse({ stateFile, home } = {}) {
+  let state; try { state = read(stateFile || consoleFile(home)); } catch { return null; }
+  if (!state || !Number.isInteger(state.port) || typeof state.token !== 'string' || !alive(state.pid)) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${state.port}/catalog/ticket`, { method: 'POST', headers: { Authorization: 'Bearer ' + state.token }, signal: AbortSignal.timeout(5000) });
+    if (!response.ok) return null;
+    const { url } = await response.json(); if (typeof url === 'string') return url;
+  } catch { /* A stale or unavailable console record cannot be reused. */ }
   return null;
 }
 async function serve({port=0,registryOptions={},stateFile}={}) {
@@ -164,7 +143,7 @@ async function serve({port=0,registryOptions={},stateFile}={}) {
     catch{/* The upstream stream was aborted; the client close handler already ran. */}
     clearTimeout(timer);activeStreams.delete(upstream.body);try{res.end();}catch{}
   }
-  const tickets=new Map(),sessions=new Map(),assets={'/catalog/':'index.html','/catalog/app.js':'app.js','/catalog/style.css':'style.css','/catalog/task-board.mjs':'task-board.mjs','/catalog/project-setup.mjs':'project-setup.mjs'};
+  const tickets=new Map(),sessions=new Map(),assets={'/catalog/':'index.html','/catalog/app.js':'app.js','/catalog/style.css':'style.css','/catalog/task-board.mjs':'task-board.mjs','/catalog/project-setup.mjs':'project-setup.mjs','/catalog/command-policy.mjs':'command-policy.mjs'};
   const cleanup=setInterval(()=>{const now=Date.now();for(const[key,expires]of tickets)if(expires<now)tickets.delete(key);for(const[key,value]of sessions)if(value.expires<now)sessions.delete(key);},60000);cleanup.unref();
   const server=http.createServer(async(req,res)=>{
     const url=new URL(req.url,'http://127.0.0.1'),host=`127.0.0.1:${req.socket.localPort}`,origin=`http://${host}`;
@@ -172,7 +151,7 @@ async function serve({port=0,registryOptions={},stateFile}={}) {
     res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     try {
       if(req.method==='GET'&&url.pathname==='/'){res.writeHead(302,{Location:'/catalog/'});res.end();return;}
-      // [AI-added] 2026-09-19 00:35: unified frontend now lives in console-web/ (old catalog-web/ retired).
+      // The catalog and project gateway share console-web/.
       if(req.method==='GET'&&assets[url.pathname]){const file=assets[url.pathname];res.writeHead(200,{'Content-Type':/\.m?js$/.test(file)?'text/javascript; charset=utf-8':file.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8','Cache-Control':'no-store'});res.end(fs.readFileSync(path.join(__dirname,'console-web',file)));return;}
       // [AI-added] 2026-09-21 10:20: The header version badge renders before login, so a stale
       // launcher is recognizable without a session. Read-only, loopback same-origin only.
@@ -221,7 +200,6 @@ async function serve({port=0,registryOptions={},stateFile}={}) {
         }
         if(input.confirmed!==true)return json(res,400,{error:'停止或重启服务需要确认'});
         const facts=serviceFacts(entry.dataRoot);
-        if(facts.headlessRunning)throw Error('该项目服务正在执行无人值守任务，等本回合结算后再停止');
         if(await wizard.online(entry.dataRoot)){
           const overview=await gatewayJson(input.key,'overview');
           await gatewayJson(input.key,'commands',{method:'POST',payload:{commandId:crypto.randomUUID(),instanceId:overview.instanceId,revision:overview.revision,action:'stop',confirmed:true,reason:`统一控制台主页${input.action==='restart'?'重启':'停止'}服务`}});
@@ -238,12 +216,6 @@ async function serve({port=0,registryOptions={},stateFile}={}) {
         return json(res,200,registry.pruneInvalid(registryOptions));
       }
       // [AI-added] 2026-09-19 00:35
-      // Deprecated: the cross-port redirect route was replaced by the same-origin
-      // gateway routes below; kept for reference only.
-      // if(req.method==='POST'&&url.pathname==='/catalog/api/open'){
-      //   if(req.headers.origin!==origin||req.headers['x-csrf-token']!==session.csrf)return json(res,403,{error:'同源控制校验失败'});
-      //   return json(res,200,await openProject((await body(req)).key,registryOptions));
-      // }
       // [AI-added] 2026-09-19 00:35: same-origin gateway to the selected project service.
       const gatewayMatch=url.pathname.match(/^\/catalog\/api\/p\/([^/]+)\/(ensure|overview|events|diagnostics|commands|stream|join-invite)$/);
       if(gatewayMatch){
@@ -281,5 +253,4 @@ async function serve({port=0,registryOptions={},stateFile}={}) {
     if(record)try{const current=read(record);if(current.pid===process.pid&&current.port===bound)fs.rmSync(record,{force:true});}catch{}});
   return {server,createTicket,close,port:bound,projectView:()=>projectView(registryOptions)};
 }
-// [AI-added] 2026-09-19 00:35: openProject was removed from exports with the cross-port redirect.
-module.exports={serve,reuse,consoleFile,legacyConsoleFile,projectView,catalogEntry,gatewayLogin};
+module.exports={serve,reuse,consoleFile,projectView,catalogEntry,gatewayLogin};

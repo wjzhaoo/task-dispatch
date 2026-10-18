@@ -16,7 +16,7 @@ node scripts/install.js qodercn
 1. 安装 task-dispatch Skill。
 2. 将桥接插件写到 `~/.qoder/app/dev-extensions/task-dispatch-bridge`，CN 版写到 `~/.qoder-cn/app/dev-extensions/task-dispatch-bridge`。
 3. 安装轻量 `UserPromptSubmit` 首次握手 Hook，只在用户提交的邀请中提取一次性邀请 ID、当前 `session_id` 和工作区；不读取历史、不轮询任务。
-4. 启用 Qoder 本地开发插件加载环境，并移除 task-dispatch 旧版 Stop/Session Hook 配置与 `qoder-hook.cjs`。
+4. 启用 Qoder 本地开发插件加载环境。当前只安装 UserPromptSubmit 邀请握手 Hook，任务唤醒由 App Plugin 桥接完成。
 
 安装或升级后重启 Qoder 一次。桥接在 Qoder 启动时监听随机本机端口，并把带随机令牌的发现文件写到配置目录下的 `task-dispatch-bridge.json`。发现文件和令牌不得输出、复制到项目或提交版本库。
 
@@ -28,7 +28,7 @@ node scripts/install.js qodercn
 node "<客户端脚本>" connect --provider qoder --invitation-id "<邀请 ID>"
 ```
 
-客户端只读取该 ID 对应的本机握手记录，要求工作区精确一致、记录未过期且唯一，并通过桥接 `chat.observeTurn` 复核真实会话。也可显式提供宿主已知的真实 session ID：
+客户端只读取该 ID 对应的本机握手记录，要求工作区精确一致、记录未过期且唯一；服务再通过记录所属的桥接 `chat.observeTurn` 核验一次真实会话，并保存桥接位置供后续唤醒。重复提交同一邀请不刷新记录；一个邀请用于不同会话会明确拒绝，需生成新邀请。也可显式提供宿主已知的真实 session ID：
 
 ```powershell
 node "<客户端脚本>" connect --provider qoder --session-id "<真实 session ID>"
@@ -38,7 +38,7 @@ node "<客户端脚本>" resume --credential "<凭据文件>" --data "<服务目
 已有绑定继续使用：
 
 ```powershell
-node "<客户端脚本>" resume --provider qoder --session-id "<真实 session ID>" --credential "<凭据文件>" --data "<服务目录>"
+node "<客户端脚本>" resume --credential "<凭据文件>" --data "<服务目录>"
 ```
 
 Qoder 不支持按目录、标题、文件时间或“最新会话”猜测身份。直接通道不读取完整会话历史；首次连接必须使用当前提示产生的一次性 invitation ID，或宿主明确提供的真实 session ID。绑定时桥接通过 `chat.observeTurn` 核实会话存在；项目工作区来自本次角色凭据和服务项目绑定。

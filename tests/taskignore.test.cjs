@@ -56,15 +56,14 @@ test('attempt policy freezes .taskignore and tracks edits to the rule file', t =
   assert.deepEqual(Object.keys(snap.manifest(root, {})).sort(), ['.taskignore', 'b.bin']);
 });
 
-test('stored policies from before .taskignore keep their old manifest scope', t => {
-  // [AI-added] 2026-09-24 14:09: Upgrade must not reinterpret an older candidate artifact.
+test('project configurations resolve .taskignore before freezing an attempt', t => {
   const root = fixture(t);
   write(root, '.taskignore', 'b.bin\n');
   write(root, 'a.txt', 'A');
   write(root, 'b.bin', 'B');
-  const legacy = snap.policy({ version: 2 });
-  assert.deepEqual(Object.keys(snap.manifest(root, legacy)).sort(), ['a.txt', 'b.bin']);
-  const next = snap.workspacePolicy(root, legacy);
+  const config = snap.policy({ version: 2 });
+  assert.deepEqual(Object.keys(snap.manifest(root, config)).sort(), ['.taskignore', 'a.txt']);
+  const next = snap.workspacePolicy(root, config);
   assert.deepEqual(Object.keys(snap.manifest(root, next)).sort(), ['.taskignore', 'a.txt']);
 });
 
@@ -95,7 +94,7 @@ test('a rule added after task registration blocks dispatch before an attempt is 
   write(root, 'result.dll', 'deliverable');
   const store = new Store(path.join(base, 'service'));
   t.after(() => store.close());
-  const dispatcher = new Dispatcher(store, { enableRealCalls: false }, () => { throw Error('unused'); });
+  const dispatcher = new Dispatcher(store,{maxConcurrent:2});
   const desktop = new Desktop(dispatcher);
   desktop.attach({ workspace: root, role: 'worker', clientId: 'worker123', token: 'a'.repeat(64) });
   desktop.attach({ workspace: root, role: 'brain', clientId: 'brain1234', token: 'b'.repeat(64) });
@@ -118,7 +117,7 @@ test('invalid rules block the task without stopping dispatch', async t => {
   write(root, 'result.txt', 'deliverable');
   const store = new Store(path.join(base, 'service'));
   t.after(() => store.close());
-  const dispatcher = new Dispatcher(store, { enableRealCalls: false }, () => { throw Error('unused'); });
+  const dispatcher = new Dispatcher(store,{maxConcurrent:2});
   const desktop = new Desktop(dispatcher);
   desktop.attach({ workspace: root, role: 'worker', clientId: 'worker123', token: 'a'.repeat(64) });
   desktop.attach({ workspace: root, role: 'brain', clientId: 'brain1234', token: 'b'.repeat(64) });

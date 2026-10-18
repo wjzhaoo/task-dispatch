@@ -1,5 +1,6 @@
 import { boardMarkup, buildBoard, renderBoard, matchesTask } from './task-board.mjs';
-import { openCreateTask, openTeamSettings, renderTeam } from './project-setup.mjs';
+import { openCreateTask, openTeamSettings, renderTeam, commandTarget } from './project-setup.mjs';
+import { commandLabels, lifecycleActions, needsDialog, retryChoice, submitLabel, buildCommand } from './command-policy.mjs';
 // [AI-added] 2026-09-19 00:25: Unified single-port console SPA. Home view renders the system project catalog; project view talks to the owning service through the catalog gateway (/catalog/api/p/<key>/*). Text-only rendering; authenticated same-origin monitoring and controls.
 const $ = id => document.getElementById(id);
 let csrf = null, ctx = null, homeTimer = null, homeProjects = [];
@@ -15,6 +16,13 @@ const name = p => p.title || baseName(p.workspace) || p.id || '未命名项目';
 function node(tag, text, cls) { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; if (cls) e.className = cls; return e; }
 function badge(text, kind = '') { return node('span', text, 'badge ' + kind); }
 function banner(text) { $('banner').hidden = !text; $('banner').textContent = text || ''; }
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 ** 2) return (bytes / 1024).toFixed(1) + ' KiB';
+  if (bytes < 1024 ** 3) return (bytes / 1024 ** 2).toFixed(1) + ' MiB';
+  return (bytes / 1024 ** 3).toFixed(2) + ' GiB';
+}
 function formatUptime(ms) {
   if (!Number.isFinite(ms) || ms < 0) return '—';
   const s = Math.floor(ms / 1000);
@@ -216,7 +224,7 @@ function card(project) {
 // ---------- Project view ----------
 function showProject(key) {
   teardownProject();
-  ctx = { key, entry: null, snapshot: null, events: [], nextBefore: null, selected: null, tab: 'overview', stream: null, paused: false, pending: 0, tick: null, cleanupPreview: null, commandSnapshot: null, pendingCommand: null, connected: false };
+  ctx = { key, entry: null, snapshot: null, events: [], nextBefore: null, selected: null, tab: 'overview', stream: null, paused: false, pending: 0, tick: null, commandSnapshot: null, pendingCommand: null, connected: false };
   $('export').hidden = false; $('controls').hidden = false;
   const view = $('view');
   view.replaceChildren();
@@ -247,7 +255,7 @@ function showProject(key) {
   const tasksPanel = node('section', undefined, 'tab-panel'); tasksPanel.id = 'tab-tasks'; tasksPanel.hidden = true;
   tasksPanel.innerHTML = boardMarkup;
   const eventsPanel = node('section', undefined, 'tab-panel'); eventsPanel.id = 'tab-events'; eventsPanel.hidden = true;
-  eventsPanel.innerHTML = '<section class="panel"><div class="panel-heading"><div><h2>交互事件</h2><p>实时变化与保留期内历史</p></div><button id="pause-events">暂停滚动</button></div><div class="filters"><input id="search" placeholder="搜索错误、事件或编号" aria-label="搜索事件"><select id="level" aria-label="事件等级"><option value="">所有等级</option><option value="error">错误</option><option value="info">信息</option></select><select id="provider" aria-label="平台"><option value="">所有平台</option><option>qoder</option><option>codex</option><option>mimo</option><option>codearts</option><option>opencode</option></select><button id="filter-events">筛选</button><button id="clear-filter">清除对象筛选</button></div><div id="event-scope" class="subtle scope"></div><div id="events" class="event-list"></div><button id="older" class="load-more">加载更早事件</button></section>';
+  eventsPanel.innerHTML = '<section class="panel"><div class="panel-heading"><div><h2>交互事件</h2><p>实时变化与保留期内历史</p></div><button id="pause-events">暂停滚动</button></div><div class="filters"><input id="search" placeholder="搜索错误、事件或编号" aria-label="搜索事件"><select id="level" aria-label="事件等级"><option value="">所有等级</option><option value="error">错误</option><option value="info">信息</option></select><select id="provider" aria-label="平台"><option value="">所有平台</option><option>qoder</option><option>codex</option><option>mimo</option><option>opencode</option><option>codearts</option><option>dsh</option></select><button id="filter-events">筛选</button><button id="clear-filter">清除对象筛选</button></div><div id="event-scope" class="subtle scope"></div><div id="events" class="event-list"></div><button id="older" class="load-more">加载更早事件</button></section>';
   view.append(back, head, tabs, overviewPanel, tasksPanel, eventsPanel);
   $('task-filter').onchange = () => renderTasks();
   $('task-stage').onchange = () => renderTasks();
@@ -342,27 +350,47 @@ function statCard(titleText, count, hint, onclick, accent) {
   e.onclick = onclick;
   return e;
 }
+function renderProjectActions(p) {
+  let panel = $('project-actions');
+  if (!panel) { panel = node('section', undefined, 'panel project-controls'); panel.id = 'project-actions'; $('stats').before(panel); }
+  const signature = JSON.stringify([p?.id, p?.paused, p?.completedAt, p?.archivedAt, p?.readOnly, p?.startup, p?.team, p?.goals, p?.queue, p?.activeGoalId]);
+  if (panel.dataset.signature === signature) return;
+  panel.dataset.signature = signature;
+  const controls = node('div', undefined, 'goal-actions');
+  const unavailable = !p || p.readOnly || p.archivedAt;
+  const firstGoal = p?.goals?.find(g => g.state === 'draft');
+  const add = (text, action, disabled, target) => {
+    const button = node('button', text, action.startsWith('start-') || action === 'resume' ? 'primary' : '');
+    button.type = 'button'; button.disabled = !!unavailable || !!disabled;
+    button.onclick = () => openCommand(action, null, target); controls.append(button);
+  };
+  add('开始', firstGoal ? 'start-goal' : 'start-work', !p?.team?.canStart || (p?.goals && !firstGoal), firstGoal ? { goalId: firstGoal.id } : {});
+  add('继续', 'resume', !p?.paused || p?.completedAt);
+  add('暂停', 'pause', p?.paused || p?.completedAt);
+  add(p?.completedAt ? '重新开启项目' : '结束项目', p?.completedAt ? 'reopen-project' : 'finish-project', false);
+  add('停止服务', 'stop', false);
+  add('清理存储', 'cleanup-preview', false);
+  const hint = p?.completedAt ? '项目已结束，可重新开启。' : p?.paused ? '项目已暂停，当前回合可完成，继续后恢复后续调度。' : p?.activeGoalId ? '当前目标执行中；新目标点击「加入队列」即可排队。' : p?.team?.ready !== p?.team?.total ? `等待成员就绪 ${p?.team?.ready || 0} / ${p?.team?.total || 0}，齐备后才能点击开始。` : '成员已就绪。选择目标并点击开始；接入本身不会启动任务。';
+  panel.replaceChildren(node('h2', '项目操作'), controls, node('p', hint, 'subtle'));
+}
 function renderProject() {
   const snapshot = ctx?.snapshot;
   if (!snapshot) return;
   const p = currentProject();
   if (p) $('p-name').textContent = name(p);
   $('add-goal').disabled = !p || !!p.archivedAt || !!p.readOnly;
+  renderProjectActions(p);
   renderTeam(p, {
+    onMemberAction: (action, binding, invitationId) => openCommand(action, null, { binding, invitationId }),
     onInvite: async (project, member) => {
       try { showInvitation(await papi('join-invite?' + new URLSearchParams({ projectId: project.id, binding: member.binding }))); }
       catch (error) { banner(error.message); }
     },
-    onGoalAction: async (project, goal, action) => {
-      const snapshot = await papi('overview');
-      const result = await papi('commands', { method: 'POST', body: JSON.stringify({ commandId: crypto.randomUUID(), instanceId: snapshot.instanceId, revision: snapshot.revision, projectId: project.id, goalId: goal.id, action, confirmed: true }) });
-      if (!result.ok) throw Error(result.error);
-      await refresh();
-    },
+    onGoalAction: async (project, goal, action) => openCommand(action, null, { goalId: goal.id }),
     onConfigure: project => {
       const { instanceId, revision } = ctx.snapshot;
       openTeamSettings({ project, onSave: async workers => {
-        const result = await papi('commands', { method: 'POST', body: JSON.stringify({ commandId: crypto.randomUUID(), instanceId, revision, projectId: project.id, action: 'configure-team', workers }) });
+        const result = await papi('commands', { method: 'POST', body: JSON.stringify({ commandId: crypto.randomUUID(), instanceId, revision, projectId: project.id, action: 'configure-team', workers, confirmed: true }) });
         if (!result.ok) throw Error(result.error);
         await refresh();
       } });
@@ -380,7 +408,6 @@ function renderProject() {
     if (p.paused) pills.append(badge('已暂停', 'warning'));
     if (p.readOnly) pills.append(badge('只读汇总', 'muted'));
   }
-  // Previous implementation: renderEvidenceSummary(p?[p]:[]);
   // [AI-added] 2026-09-24 10:58: Render the compact, stateful evidence summary.
   renderEvidenceSummaryV2(p?[p]:[]);
   const connections = p?.connections || [], tasks = p?.tasks || [], alerts = p?.alerts || [];
@@ -453,7 +480,9 @@ function taskActions(t) {
   const add = (text, action) => { const b = node('button', text); b.type = 'button'; b.onclick = () => openCommand(action, t.id); actions.append(b); };
   const last = t.attempts.at(-1);
   if (['blocked', 'uncertain'].includes(t.state)) add('重试', 'retry');
-  if (t.budgetExhausted) add('追加额度', 'task-budget');
+  add('追加额度', 'task-budget');
+  add('重置任务', 'reset-task');
+  if (last && !last.settled && !last.claimedBy && last.wakeNotice?.status === 'pending') add('重试唤醒', 'wake-retry');
   if (t.waitingForWorker || t.state === 'blocked') add('改派', 'assign');
   if (last && !last.settled && !last.claimedBy && (last.wakeNotice?.status === 'sent' || last.wakeNotice?.claimStatus === 'stalled')) add('再次提醒', 'wake-remind');
   return actions;
@@ -476,15 +505,15 @@ function renderTaskDetail() {
   const t = currentProject()?.tasks.find(t => t.id === sel.id);
   if (!t) { box.hidden = false; box.replaceChildren(node('p', '该任务已移除。')); return; }
   box.hidden = false;
-  box.replaceChildren(node('h3', `${t.id} · ${(t.stageHeld?'初审通过，等待阶段终审':label(t.state))}`), detailRows([['任务', t.title], ['所属目标', currentProject()?.goals?.find(goal => goal.id === t.goalId)?.title || t.goalId || '旧项目'], ['契约版本', t.contractRevision || 1], ['依赖', t.dependsOn.join('、') || '无'],
+  box.replaceChildren(node('h3', `${t.id} · ${(t.stageHeld?'初审通过，等待阶段终审':label(t.state))}`), detailRows([['任务', t.title], ['所属目标', currentProject()?.goals?.find(goal => goal.id === t.goalId)?.title || t.goalId || '未关联目标'], ['契约版本', t.contractRevision], ['依赖', t.dependsOn.join('、') || '无'],
     ['替代目标', (t.supersedes || []).join('、') || '无'], ['解决依据', t.resolution ? `${t.resolution.replacementTaskId}：${t.resolution.reason}` : '无'],
-    ['大脑处置', t.attention && !t.attention.acknowledged ? '待大脑领取并处理' : ['blocked','uncertain'].includes(t.state) ? '通知已确认，任务仍需正式处置' : '无'], ['当前错误', t.error || '无']]));
+    ['大脑处置', ['blocked','uncertain'].includes(t.state) && t.attention?.waitReason ? '等待用户决定：' + t.attention.waitReason : ['blocked','uncertain'].includes(t.state) && t.attention?.remediationTaskId ? '替代任务处理中：' + t.attention.remediationTaskId : ['blocked','uncertain'].includes(t.state) && t.attention ? '阻塞尚未解决，等待大脑实际处置' : '无'], ['当前错误', t.error || '无']]));
   box.append(taskActions(t));
   const board = buildBoard(currentProject()), group = board.stages.find(s => s.id === t.stageId);
   box.append(node('h3', board.reviews.get(t.id).text));
   if (group) {
     box.append(detailRows([['所属阶段', group.latest.milestone], ['本次整体审核范围', [...group.taskIds].join('、')], ['最新轮次', group.latest.id]]));
-    for (const r of group.rounds.filter(r => (r.reviewTaskIds || r.members.map(m => m.taskId)).includes(t.id))) {
+    for (const r of group.rounds.filter(r => r.reviewTaskIds.includes(t.id))) {
       box.append(detailRows([['大脑终审轮次', r.id], ['阶段结论', ({pass:'通过',needs_fix:'需补修',blocked:'阻塞'}[r.verdict] || '尚未结算')], ['终审领取', r.attempt?.claimedAt ? fullTime(r.attempt.claimedAt) : '未领取']]));
     }
   } else box.append(node('p', '尚未登记阶段，提交阶段计划后统一终审。', 'subtle'));
@@ -571,46 +600,143 @@ function fillOptions(id, values, value) {
   $(id).replaceChildren(...values.map(([v, t]) => { const e = node('option', t); e.value = v; return e; }));
   if (value) $(id).value = value;
 }
-const lifecycleActions = { 'archive-project': '归档项目', 'restore-project': '恢复归档项目', 'delete-project': '永久删除项目', 'reset-task': '完全重置任务' };
-function commandTargets() {
-  const p = ctx.commandSnapshot?.projects.find(p => p.id === $('command-project').value && !p.readOnly);
-  fillOptions('command-task', (p?.tasks || []).map(t => [t.id, t.id + ' · ' + t.title]), ctx.selected?.kind === 'task' ? ctx.selected.id : null);
-  fillOptions('command-binding', (p?.connections || []).map(c => [c.binding, c.provider + ' / ' + label(c.role) + ' / ' + c.binding]), ctx.selected?.binding);
+const backgroundActions = ['archive-project', 'restore-project', 'delete-project'];
+function renderCommandTarget() {
+  const target = ctx.commandTarget, p = ctx.commandSnapshot.projects.find(p => p.id === target.projectId);
+  const rows = [['项目', name(p)]];
+  if (target.taskId) { const t = p.tasks.find(t => t.id === target.taskId); rows.push(['任务', t.title + ' · ' + t.id]); }
+  if (target.goalId) { const g = p.goals.find(g => g.id === target.goalId); rows.push(['目标', g.title]); }
+  if (target.binding) { const c = p.connections.find(c => c.binding === target.binding); rows.push(['成员', label(c.role) + ' · ' + c.provider + (c.role === 'worker' ? ' · ' + c.binding : '')]); }
+  $('command-target').replaceChildren(detailRows(rows));
 }
-function impact() {
-  const action = $('action').value;
-  const descriptions = { pause: '暂停只阻止后续调度，当前回合继续。', resume: '继续项目调度，可能立即派发已排队任务。', retry: '重试会重新排队；uncertain 状态必须先核实旧执行进程停止。', 'rebind-invite': '生成 30 分钟一次性改绑邀请，并按 Codex、MiMo、Qoder、CodeArts、OpenCode 或等待型平台给出对应提示词；不勾选停止确认时安全等待旧端结算，勾选后会转移合法的在途所有权。', 'rebind-cancel': '取消尚未完成的改绑邀请，不改变当前绑定。', detach: '解绑可能终止审核所有权；在途执行受服务保护，不能强制移除。', stop: '停止整个服务，所有管理台连接断开；执行中任务可能需要核实。重启需返回项目目录重新进入。', 'cleanup-apply': '仅执行最近清理预览中的目录清理，请先核对预览结果。', 'wake-retry': '仅加速检查明确可重试的 pending 通知；不重发 sent 或 uncertain 通知。', 'wake-remind': '为当前未领取 attempt 补充一次待命授权并发送独立提醒；必须填写原因，送达不确定时禁止执行。', 'finish-project': '所有目标必须完成或取消，且任务已通过或由通过的替代任务解决；结束整个项目后等待端将退出。' };
-  if (lifecycleActions[action]) {
-    const p = ctx.commandSnapshot?.projects.find(p => p.id === $('command-project').value);
-    $('impact').textContent = `项目 ID：${p?.id || '—'}。` + ({ 'archive-project': '默认隐藏并暂停项目，保留所有历史。', 'restore-project': '恢复后保持暂停，核对后再继续。', 'delete-project': '永久删除调度记录并撤销连接；保留审计、源工程及磁盘产物。', 'reset-task': '清空执行、审核、唤醒、产物关联和次数，额度恢复 30。保留任务定义、旧记录审计及源文件。项目会暂停；已有执行的下游任务必须级联重置。' }[action]);
-    return;
-  }
-  $('impact').textContent = descriptions[action] || '操作会记录目标、原因与结果。状态变化后服务会拒绝旧操作。';
+function commandTask() {
+  return ctx.commandSnapshot.projects.find(p => p.id === ctx.commandTarget.projectId)?.tasks.find(t => t.id === ctx.commandTarget.taskId);
 }
 function commandFields() {
-  const a = $('action').value;
-  const visible = { 'command-project': false, 'command-task': ['retry', 'task-budget', 'assign', 'wake-retry', 'wake-remind'].includes(a), 'command-binding': ['detach', 'rebind-invite'].includes(a), 'invitation-id': a === 'rebind-cancel', 'worker-id': a === 'assign', additional: a === 'task-budget', 'confirmed-stopped': ['retry', 'rebind-invite'].includes(a), 'restart-worker': a === 'retry' };
-  for (const [id, show] of Object.entries(visible)) $(id).closest('label').hidden = !show;
-  $('confirm-text-label').hidden = !['delete-project', 'reset-task'].includes(a);
-  $('reset-dependents-label').hidden = a !== 'reset-task';
-  $('lifecycle-preview').hidden = !lifecycleActions[a];
-  if (a === 'reset-task') $('command-task').closest('label').hidden = false;
-  if (['delete-project', 'reset-task'].includes(a)) $('confirmed-stopped').closest('label').hidden = false;
+  const action = $('action').value, task = commandTask();
+  const visible = { 'worker-id': action === 'assign', additional: action === 'task-budget', 'retry-mode': action === 'retry' && retryChoice(task), 'rebind-mode': action === 'rebind-invite' };
+  for (const [id, show] of Object.entries(visible)) {
+    $(id).closest('label').hidden = !show;
+    $(id).disabled = !show;
+  }
+  $('execute').textContent = ctx.pendingCommand ? '查询操作结果' : submitLabel(action, { task, preview: ctx.commandPreview, recovery: $('rebind-mode').value === 'recover' });
 }
-function openCommand(actionValue, targetTaskId) {
-  if (!ctx?.snapshot) return;
+function impact() {
+  const action = $('action').value, task = commandTask();
+  const descriptions = {
+    'cancel-goal': '取消这个尚未开始的目标，保留历史记录。',
+    retry: task?.state === 'uncertain' ? '请先停止旧会话及后台执行，再点击下方按钮重试。' : '按所选方式重新排队。',
+    'rebind-invite': $('rebind-mode').value === 'recover' ? '请先停止旧会话。新成员接入时将接管在途任务。' : '生成一次性邀请；旧会话有在途任务时，等待其结算后交接。',
+    detach: '解除这个成员的连接；服务会阻止解绑仍在执行任务的成员。',
+    stop: '停止此项目服务并断开连接。可从项目目录重新启动服务。',
+    'finish-project': '结束整个项目，等待中的成员退出。仍有未完成目标或任务时服务会拒绝操作。',
+    'task-budget': '为这个任务增加可用的尝试次数。', assign: '将这个任务交给所选执行员。',
+    'cleanup-preview': '清理已不再使用的缓存目录，保留源工程和审计记录。',
+    'cleanup-apply': '清理已不再使用的缓存目录，保留源工程和审计记录。'
+  };
+  $('impact').textContent = descriptions[action] || '';
+  $('impact').hidden = !$('impact').textContent;
+}
+async function prepareCommandPreview() {
+  const owner = ctx, action = $('action').value, token = Symbol();
+  owner.commandView = token; owner.commandPreview = null;
+  $('command-preview').replaceChildren(); $('command-preview').hidden = true;
+  $('command-result').textContent = ''; $('execute').disabled = false;
+  impact(); commandFields();
+  const lifecycle = lifecycleActions.includes(action), cleanup = ['cleanup-preview', 'cleanup-apply'].includes(action);
+  if (!lifecycle && !cleanup) return;
+  $('execute').disabled = true; $('command-result').textContent = '正在读取影响范围…';
+  try {
+    const result = await papi('commands', { method: 'POST', body: JSON.stringify({
+      commandId: crypto.randomUUID(), instanceId: owner.commandSnapshot.instanceId, revision: owner.commandSnapshot.revision,
+      ...owner.commandTarget, action: lifecycle ? 'lifecycle-preview' : 'cleanup-preview', ...(lifecycle ? { operation: action } : {})
+    }) });
+    if (ctx !== owner || owner.commandView !== token) return;
+    if (!result.ok) throw Error(result.error || '无法读取影响范围');
+    owner.commandPreview = result;
+    const box = $('command-preview'), list = node('ul', undefined, 'command-preview-list');
+    if (lifecycle) {
+      $('impact').hidden = false;
+      $('impact').textContent = result.message + (action === 'reset-task' ? ' 本次将同时重置下列全部下游及同阶段任务。' : '')
+        + (result.requiresStopped ? ' 请先停止相关宿主执行，再点击下方按钮确认已停止并执行。' : '');
+      box.append(node('p', `影响任务：${result.affectedTasks.length} 项`, 'subtle'));
+      for (const task of result.affectedTasks) list.append(node('li', `${task.title || task.id} · ${task.id} · ${label(task.state)}`));
+    } else {
+      box.append(node('p', `可清理 ${result.entries.length} 个目录，释放 ${formatBytes(result.reclaimableBytes)}`, 'subtle'));
+      for (const entry of result.entries) list.append(node('li', `${entry.relative} · ${formatBytes(entry.bytes)}`));
+    }
+    box.append(list); box.hidden = false;
+    $('command-result').textContent = cleanup && !result.entries.length ? '暂无可清理的缓存。' : '';
+    $('execute').disabled = cleanup && !result.entries.length;
+    commandFields();
+  } catch (error) {
+    if (ctx === owner && owner.commandView === token) $('command-result').textContent = error.message;
+  }
+}
+async function openCommand(actionValue, targetTaskId, target = {}) {
+  if (!ctx?.snapshot || ctx.commandBusy) return;
   if (ctx.pendingCommand) { $('command-dialog').showModal(); return; }
   const p = currentProject();
   if (!p || p.readOnly) { banner('当前项目为只读汇总或不可用，不能执行管理操作。'); return; }
-  ctx.commandSnapshot = structuredClone(ctx.snapshot);
-  if (actionValue && [...$('action').options].some(o => o.value === actionValue)) $('action').value = actionValue; else $('action').selectedIndex = 0;
-  fillOptions('command-project', [[p.id, name(p)]], p.id);
-  commandTargets();
-  if (targetTaskId) $('command-task').value = targetTaskId;
-  impact(); commandFields();
-  $('confirm-impact').checked = false;
-  $('command-result').textContent = '';
+  let targetIdentity;
+  try { targetIdentity = commandTarget(p, actionValue, { ...target, taskId: targetTaskId }); }
+  catch (error) { banner(error.message); return; }
+  ctx.commandSnapshot = structuredClone(ctx.snapshot); ctx.commandTarget = targetIdentity; ctx.commandPreview = null;
+  $('action').closest('label').hidden = !!actionValue;
+  fillOptions('action', (actionValue ? [actionValue] : backgroundActions).map(action => [action, commandLabels[action]]), actionValue);
+  fillOptions('worker-id', (p.team?.members || []).filter(member => member.role === 'worker').map(member => [member.workerId, member.workerId + ' · ' + (member.responsibilities || member.capability)]));
+  $('additional').value = '2'; $('retry-mode').value = 'resume'; $('rebind-mode').value = 'safe';
+  $('command-dialog').querySelector('h2').textContent = actionValue ? commandLabels[actionValue] : '后台控制';
+  for (const control of $('command-form').elements) control.disabled = false;
+  renderCommandTarget(); commandFields(); impact();
+  $('command-result').textContent = ''; $('command-preview').replaceChildren(); $('command-preview').hidden = true;
+  if (actionValue && !needsDialog(actionValue, commandTask())) {
+    await executeCommand(buildCommand(ctx.commandSnapshot, ctx.commandTarget, actionValue));
+    return;
+  }
   $('command-dialog').showModal();
+  await prepareCommandPreview();
+}
+async function executeCommand(command) {
+  const owner = ctx;
+  if (!owner || owner.commandBusy) return;
+  owner.commandBusy = true; owner.pendingCommand = command;
+  const form = $('command-form'), dialog = $('command-dialog');
+  const controls = [...form.elements].map(control => [control, control.disabled]);
+  controls.forEach(([control]) => { control.disabled = true; });
+  const preventClose = event => event.preventDefault(); dialog.addEventListener('cancel', preventClose);
+  let completed = false;
+  try {
+    const result = await papi('commands', { method: 'POST', body: JSON.stringify(command) });
+    owner.pendingCommand = null;
+    if (ctx !== owner) return;
+    if (!result.ok) { const error = Error(result.error || '操作失败'); error.definitive = true; throw error; }
+    completed = true; dialog.close();
+    if (['stop', 'delete-project'].includes(command.action)) {
+      location.hash = '#/';
+      return;
+    }
+    if (command.action === 'cleanup-apply') owner.commandPreview = null;
+    if (command.action === 'rebind-invite' && result.platforms?.length) showInvitation(result);
+    try { await refresh(); banner(result.message || (commandLabels[command.action] + '已完成')); }
+    catch { banner('操作已完成，刷新失败，请点击刷新查看最新状态。'); }
+  } catch (error) {
+    if (error.definitive) owner.pendingCommand = null;
+    if (ctx !== owner) return;
+    $('command-result').textContent = error.message + (owner.pendingCommand ? '。点击「查询操作结果」可查询同一操作，不会重复执行。' : '。请关闭后重新打开，获取最新状态。');
+    if (!dialog.open) dialog.showModal();
+  } finally {
+    owner.commandBusy = false;
+    if (ctx === owner) controls.forEach(([control, disabled]) => { control.disabled = disabled; });
+    dialog.removeEventListener('cancel', preventClose);
+    if (ctx === owner && !completed) {
+      // A definitive failure needs a fresh snapshot; an unknown result reuses the exact receipt.
+      $('execute').disabled = !owner.pendingCommand;
+      commandFields();
+      for (const control of form.elements) control.disabled = !['execute', 'close-dialog', 'command-cancel'].includes(control.id);
+      $('execute').disabled = !owner.pendingCommand;
+    }
+  }
 }
 // [AI-added] 2026-09-19: A generated rebind invitation deserves a copyable popup, not raw JSON.
 // [AI-added] 2026-09-21: One invitation carries an adapted prompt per host platform; switching
@@ -635,9 +761,9 @@ function showInvitation(result) {
 }
 function wireCommandDialog() {
   $('controls').onclick = () => openCommand();
-  $('close-dialog').onclick = () => $('command-dialog').close();
-  $('command-project').onchange = () => { commandTargets(); commandFields(); };
-  $('action').onchange = () => { impact(); commandFields(); };
+  $('close-dialog').onclick = $('command-cancel').onclick = () => $('command-dialog').close();
+  $('action').onchange = prepareCommandPreview;
+  $('rebind-mode').onchange = () => { impact(); commandFields(); };
   $('close-invitation').onclick = () => $('invitation-dialog').close();
   $('invitation-platform').onchange = renderInvitationVariant;
   $('invitation-done').onclick = () => $('invitation-dialog').close();
@@ -652,38 +778,17 @@ function wireCommandDialog() {
     $('copy-invitation').textContent = copied ? '已复制' : '已选中，请按 Ctrl+C';
     if (copied) setTimeout(() => { $('copy-invitation').textContent = '复制提示词'; }, 1500);
   };
-  $('lifecycle-preview').onclick = async () => {
-    try {
-      const result = await papi('commands', { method: 'POST', body: JSON.stringify({ action: 'lifecycle-preview', operation: $('action').value, commandId: crypto.randomUUID(), instanceId: ctx.commandSnapshot.instanceId, revision: ctx.commandSnapshot.revision, projectId: $('command-project').value, taskId: $('command-task').value }) });
-      $('command-result').textContent = JSON.stringify(result, null, 2);
-    } catch (e) { $('command-result').textContent = e.message; }
-  };
   $('command-form').onsubmit = async e => {
     e.preventDefault();
-    const action = $('action').value, p = ctx.commandSnapshot.projects.find(p => p.id === $('command-project').value), t = p?.tasks.find(t => t.id === $('command-task').value), c = p?.connections.find(c => c.binding === $('command-binding').value);
-    let command = ctx.pendingCommand;
-    if (!command && lifecycleActions[action]) command = { commandId: crypto.randomUUID(), instanceId: ctx.commandSnapshot.instanceId, revision: ctx.commandSnapshot.revision, action, projectId: $('command-project').value, taskId: $('command-task').value, confirmText: $('confirm-text').value, resetDependents: $('reset-dependents').checked, confirmed: $('confirm-impact').checked, confirmedStopped: $('confirmed-stopped').checked, reason: $('reason').value };
-    command = command || { commandId: crypto.randomUUID(), instanceId: ctx.commandSnapshot.instanceId, revision: ctx.commandSnapshot.revision, action, projectId: p?.id, taskId: t?.id, binding: c?.binding, clientId: c?.clientId, invitationId: $('invitation-id').value, attemptId: t?.attempts.at(-1)?.id, workerId: $('worker-id').value, additionalAttempts: Number($('additional').value), reason: $('reason').value, confirmed: $('confirm-impact').checked, confirmedStopped: $('confirmed-stopped').checked, restartWorker: $('restart-worker').checked, previewId: ctx.cleanupPreview };
-    ctx.pendingCommand = command;
-    $('execute').disabled = true;
-    try {
-      const result = await papi('commands', { method: 'POST', body: JSON.stringify(command) });
-      ctx.pendingCommand = null;
-      if (command.action === 'cleanup-preview') ctx.cleanupPreview = result.previewId;
-      $('command-result').textContent = JSON.stringify(result, null, 2);
-      $('confirm-impact').checked = false;
-      if (command.action === 'rebind-invite' && result?.platforms?.length) showInvitation(result);
-      if (command.action !== 'stop') {
-        await refresh(); ctx.commandSnapshot = structuredClone(ctx.snapshot); commandTargets();
-        // [AI-added] 2026-09-19: Keep the operator's chosen target visible; otherwise the rebuilt
-        // dropdown falls back to the first connection and reads as another role's rebind.
-        if (command.binding && [...$('command-binding').options].some(o => o.value === command.binding)) $('command-binding').value = command.binding;
-        if (command.taskId && [...$('command-task').options].some(o => o.value === command.taskId)) $('command-task').value = command.taskId;
-      }
-    } catch (error) {
-      if (error.definitive) ctx.pendingCommand = null;
-      $('command-result').textContent = error.message + (ctx.pendingCommand ? '\n结果尚未确认，再次点击将查询同一命令，不会重复执行。' : '\n请关闭并重新打开控制面板，核对最新状态。');
-    } finally { $('execute').disabled = false; }
+    if (!ctx || ctx.commandBusy) return;
+    let action = $('action').value;
+    if (!ctx.pendingCommand && (lifecycleActions.includes(action) || ['cleanup-preview', 'cleanup-apply'].includes(action)) && !ctx.commandPreview) return;
+    if (['cleanup-preview', 'cleanup-apply'].includes(action)) action = 'cleanup-apply';
+    const command = ctx.pendingCommand || buildCommand(ctx.commandSnapshot, ctx.commandTarget, action, {
+      workerId: $('worker-id').value, additionalAttempts: $('additional').value,
+      restartWorker: $('retry-mode').value === 'worker', recovery: $('rebind-mode').value === 'recover', preview: ctx.commandPreview
+    });
+    await executeCommand(command);
   };
 }
 // [AI-added] 2026-09-19: cleanup dialog submit reports the removal result inline and refreshes the home list.

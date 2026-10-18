@@ -1,8 +1,8 @@
-# 任务尝试次数与兼容迁移
+# 任务尝试次数与分配
 
 每个任务默认允许 30 次尝试，可在创建任务时填写 maxAttempts。一次新执行 attempt 或新审核 attempt 各计一次，共用任务额度；按唯一 attempt ID 从保留的 attempts 计算 execution、review、total。失败、返修、恢复和越界纠正产生的新 attempt 也计数。重复领取、提交去重、内部工具调用、规划、人员配置和交接等待不增加次数。额度耗尽不终止在途 attempt，仍可领取及提交。
 
-项目 turns 是累计次数的兼容字段，status 同时提供 projectAttempts。保留累计值，不用现存回执重新覆盖历史统计。任务额度耗尽只阻止它的新 attempt；项目内仍串行，依赖、在途执行、uncertain 工作区锁及规划门禁保持原规则。
+项目 turns 保存累计尝试次数，status 同时提供 projectAttempts。保留累计值，不用现存回执重新覆盖历史统计。任务额度耗尽只阻止它的新 attempt；项目内仍串行，依赖、在途执行、uncertain 工作区锁及规划门禁保持原规则。
 
 ## 操作
 
@@ -14,7 +14,7 @@ assign --task T01 --worker-id strong --capability strong --reason "需要强模�
 assign --task T02 --worker-id strong --capability strong --update-plan --reason "下一任务也涉及恢复协议"
 ```
 
-task-budget 追加正整数额度，要求原因并记事件，不重置计数、不自动重试 blocked。assign 默认只修改当前任务的 currentWorkerId 和当前能力要求；workerId 保持为当前执行者兼容别名。plannedWorkerId/plannedRequiredCapability 保存计划；重复提交原任务计划不会因当前执行者升级而冲突。update-plan 只允许未开始的对应任务，由大脑明确记录原因。模型选择仍由计划和既有 worker 能力分配决定，不自动选择模型；升级不增加额度。大脑只规划、派发和审核，不实现业务代码。
+task-budget 追加正整数额度，要求原因并记事件，不重置计数、不自动重试 blocked。assign 默认只修改当前任务的 currentWorkerId 和当前能力要求；任务状态使用 currentWorkerId，不再提供 workerId 别名。plannedWorkerId/plannedRequiredCapability 保存计划；重复提交原任务计划不会因当前执行者升级而冲突。update-plan 只允许未开始的对应任务，由大脑明确记录原因。模型选择仍由计划和既有 worker 能力分配决定，不自动选择模型；升级不增加额度。大脑只规划、派发和审核，不实现业务代码。
 
 管理端（带 --data <服务目录>）：
 
@@ -26,13 +26,9 @@ node runtime/cli.cjs budget PROJECT off
 
 budget 的数字是可选项目累计上限，显式调用即启用；off 关闭保护，不清零累计。项目因保护暂停后，仍需显式 resume。新项目不设置 maxTurns 即不启用项目保护。菜单优先展示任务尝试次数及执行/审核拆分，追加操作面向单个任务。
 
-## 旧数据迁移
+## 初始化与数据校验
 
-保持 state version 1，增量添加 attemptPolicyVersion: 1 及上述字段。Store 加载时仅在内存归一化，下一次正常原子保存才持久化；不另写迁移脚本、不重放回执、不改 attempt ID、delivery、claimedBy、sessions、历史 events 或产物引用。重复加载及迁移幂等。
-
-旧任务的实际 workerId/requiredCapability 初始化计划分配和当前分配；旧数据没有独立计划历史，无法还原更早的计划，不凭模型名称推测。无 workerId 的任务仍用 default。旧任务 maxAttempts 缺失时补 30，已消耗次数从历史 attempts 计算，不从 0 重启；如果已经超过额度，需显式追加足够次数，仍允许在途 attempt 收尾。
-
-旧 maxTurns 没有默认值/人工设定来源，因此迁移统一保留原数值、关闭 projectBudgetEnabled；不擅自认定某个数值是人工保护。需要保留原项目保护的管理员在恢复调度前显式运行 budget。旧 turns 和 paused 原样保留，不因迁移自动解除人工暂停。新增项目显式 maxTurns 和新版 budget 操作都有明确保护开关，不会被后续迁移关闭。
+服务数据保持 version 2。项目创建时初始化累计次数和预算开关；任务创建及重置共用初始化逻辑，写入 maxAttempts、plannedWorkerId、currentWorkerId、plannedRequiredCapability 和当前能力要求。加载和保存不再补齐历史字段；结构不完整的旧数据会被拒绝，原文件不被改写。
 
 ## 部署安全边界
 

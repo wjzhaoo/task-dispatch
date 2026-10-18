@@ -6,6 +6,10 @@ function touch(d, identity) {
   if (identity.role !== 'reviewer') return;
   d.reviewerPresence ||= new Map();
   d.reviewerPresence.set(identity.projectId, {clientId:identity.clientId, at:Date.now()});
+  if(d.reviewerChecks?.get(identity.projectId)===identity.clientId)d.reviewerChecks.delete(identity.projectId);
+}
+function checking(d, p) {
+  return !!p.bindings?.reviewer && d.reviewerChecks?.get(p.id)===p.bindings.reviewer.clientId && !p.handovers?.reviewer;
 }
 function online(d, p) {
   const seen=d.reviewerPresence?.get(p.id);
@@ -13,11 +17,6 @@ function online(d, p) {
 }
 function passed(t) {
   return t.preReview?.verdict==='pass' && t.preReview.artifactId===t.artifactId;
-}
-// [AI-added] 2026-09-15 14:13
-function reconcile(d,p) {
-  // Kept as a compatibility hook for dispatcher.tick(). Time alone is not
-  // deterministic evidence that a reviewer has stopped.
 }
 function disconnect(d,p,clientId,reason='reviewer_detached') {
   for(const t of Object.values(p.tasks)) {
@@ -33,4 +32,4 @@ function disconnect(d,p,clientId,reason='reviewer_detached') {
   }
   d.reviewerPresence?.delete(p.id);
 }
-module.exports={touch,online,passed,reconcile,disconnect};
+module.exports={touch,online,passed,disconnect,checking};

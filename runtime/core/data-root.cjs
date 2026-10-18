@@ -19,14 +19,8 @@ function workspaceArgument(args = []) {
   return path.resolve(args[index + 1]);
 }
 
-function legacyDataRoot(home = os.homedir()) {
+function systemIndexRoot(home = os.homedir()) {
   return path.resolve(home, '.task-dispatch-service');
-}
-
-// [AI-added] 2026-09-17 11:46
-function legacyProjectDataRoot(workspace) {
-  const resolved = path.resolve(workspace);
-  return path.join(path.dirname(resolved), `.${workspaceKey(resolved)}.task-dispatch-service`);
 }
 
 // [AI-added] 2026-09-17 11:46
@@ -69,37 +63,17 @@ function credentialData(file) {
   return path.resolve(value.data);
 }
 
-// [AI-added] 2026-09-24 11:16: A migrated project must not silently resurrect the old
-// user-home service when a saved invitation still carries its historical --data path.
-function guardMigratedLegacyRoot(root, workspace, home = os.homedir()) {
-  if (!workspace) return root;
-  const same = (left, right) => process.platform === 'win32' ? path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase() : path.resolve(left) === path.resolve(right);
-  if (!same(root, legacyDataRoot(home))) return root;
-  const target = projectDataRoot(workspace);
-  if (fs.existsSync(path.join(target, 'config.json')) && fs.existsSync(path.join(target, 'state.json'))) {
-    throw Error('Project service has moved to ' + target + '; use its current credential and --data path instead of the legacy user-home service');
-  }
-  // [AI-added] 2026-09-24 13:30: Do not create a new service inside the reserved metadata index.
-  if (!fs.existsSync(path.join(root, 'config.json')) && !fs.existsSync(path.join(root, 'state.json'))) {
-    throw Error('The user-home .task-dispatch-service directory is reserved for the system index; use the workspace service at ' + target);
-  }
-  return root;
+function assertServiceRoot(root, home) {
+  const target = path.resolve(root);
+  if (inside(systemIndexRoot(home), target)) throw Error('The user-home .task-dispatch-service directory is reserved for the system index');
+  return target;
 }
 
 function resolveDataRoot({ args = [], data, credentialFile, workspace, home } = {}) {
-  const explicit = dataArgument(args);
-  // Previous implementation: if (explicit) return explicit;
-  // Previous implementation: if (data) return path.resolve(data);
-  // [AI-added] 2026-09-24 11:16: Reject stale explicit roots after migration.
-  if (explicit) return guardMigratedLegacyRoot(explicit, workspace, home);
-  if (data) return guardMigratedLegacyRoot(path.resolve(data), workspace, home);
-  const saved = credentialData(credentialFile);
-  // Previous implementation: if (saved) return saved;
-  // [AI-added] 2026-09-24 11:16: A saved credential can also point at the retired root.
-  if (saved) return guardMigratedLegacyRoot(saved, workspace, home);
-  if (workspace) return projectDataRoot(workspace);
-  return legacyDataRoot(home);
+  const root = dataArgument(args) || data || credentialData(credentialFile) || (workspace && projectDataRoot(workspace));
+  if (!root) throw Error('A workspace, credential or explicit --data directory is required');
+  return assertServiceRoot(root, home);
 }
 
 // [AI-added] 2026-09-17 11:46
-module.exports = { dataArgument, workspaceArgument, legacyDataRoot, legacyProjectDataRoot, projectControlRoot, projectDataRoot, inside, ensureProjectLayout, credentialData, resolveDataRoot };
+module.exports = { dataArgument, workspaceArgument, systemIndexRoot, assertServiceRoot, projectControlRoot, projectDataRoot, inside, ensureProjectLayout, credentialData, resolveDataRoot };
