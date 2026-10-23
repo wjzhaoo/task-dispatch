@@ -1,82 +1,212 @@
+<div align="center">
+
 # Task Dispatch
 
-Web 管理端创建目标后保持待开始，全部成员就绪后由用户点击「开始」：只填名称、目标与验收要求、项目目录，默认“大脑＋初审端＋一名执行员”，成员配置收进高级设置。同一目录复用项目、团队与绑定，连续新增的目标顺序执行；缺少的成员可以同时接入，一次 connect 完成核验、保存凭据与待命。创建与接入本身不会启动任务；已明确加入队列的目标按顺序执行，大脑明确完成验收后继续下一目标，队列为空则保留成员待命。本轮仅支持同机，详情见[统一 Web 控制台](docs/admin-console.md)。
+**让不同 AI 会话组成一支有分工、有审核、能持续交接的开发团队。**
 
-新增[统一 Web 控制台](docs/admin-console.md)：双击 `dashboard.bat`（或 `web-console.bat`）直接打开浏览器主页，无需在终端选择目录。主页读取用户总目录中的项目目录表（`%USERPROFILE%\.task-dispatch-service\service-registry.json`，仅含项目 ID 与路径映射，不含令牌），表里有多少项目就显示多少张卡片；点击进入的项目控制台仍在同一端口内打开（默认 **43187**，被占用自动顺延；已运行则复用并重新打开登录链接），不再跳转其他端口。控制台分「总览 / 任务 / 事件」三个页签，跨项目聚合只保留在主页。原命令行菜单保留为 `dashboard.bat --cli`。
+大脑负责规划与终审 · 初审端逐项把关 · 执行员完成实现
 
-当前版本：**1.0.0**。版本源文件为 [VERSION](VERSION)，变更记录见 [CHANGELOG.md](CHANGELOG.md)。package.json、插件清单和技能版本标记保持一致，自动测试检查版本漂移。
+本地运行 · 跨平台会话协作 · 可视化任务看板 · 目标队列
 
-新增 [Qoder / QoderCN 原会话接入](skills/task-dispatch/references/qoder.md)：`node scripts/install.js qoder`（或 `qodercn`）安装技能与常驻 App Plugin 桥接，重启 Qoder 后 `connect --provider qoder` 接入。提交后 `resume` 可长期待命，任务到达时桥接通过 `chat.continueSession` 直接唤醒原会话，不使用 Stop Hook。
+[快速上手](#快速上手) · [项目亮点](#项目亮点) · [支持平台](#支持平台) · [文档导航](#文档导航)
 
-新增 [OpenCode 2.x 原会话接入](skills/task-dispatch/references/opencode.md)：`node scripts/install.js opencode` 安装技能，使用真实 `ses_...` 会话 ID 接入 brain、reviewer 或 worker。Skill 安装支持 Codex、MiMo、Qoder、QoderCN 和 OpenCode，`all` 包含这五个安装目标。
+**v1.0.0** · **Node.js 22+**（OpenCode 需 22.13+）· **运行时无第三方 npm 依赖**
 
-[CodeArts 接入](skills/task-dispatch/references/codearts.md) 使用独立 Hook bridge，参数为 `--provider codearts`（兼容 `codeartsdoer`），不使用 OpenCode 2.x 数据库或 CLI。已有 Hook 环境可继续接入；Skill 安装目标保持上述五种。
+</div>
 
-游戏与应用开发的任务分派 Skill：强模型设计与审核，经济模型处理明确任务，按风险与依赖设置审核点。
+Task Dispatch 是面向游戏与应用开发的任务分派 Skill 和本地协作运行时。你提出目标、邀请自己的 AI 会话加入并点击开始，服务负责在角色之间交接任务、保留审核证据，并把进度呈现在同一个 Web 控制台中。
 
-## 可选：本地自动交接服务
+适合把强模型放在规划、复杂决策与整体验收上，把边界明确的实现与初审交给合适的模型。平台与模型由你在各自会话中选择；Task Dispatch 负责协作流程。
 
-支持一个 brain、一个必需的 reviewer、多 worker 编号接入，项目内保持串行。brain connect 后先评估本阶段模型数量与职责，`staff --file` 登记并返回逐编号 workerInvites；`invite --worker-id strong --capability strong` 生成指定执行员说明。任务可指定 workerId/requiredCapability，没有匹配绑定时排队等待，不消耗执行回合。`detach` 主动断绑；reviewer 崩溃且不能自解绑时，brain 可明确执行 `detach --role reviewer`，安全终止旧初审所有权，等待新 reviewer 恢复初审，绝不按超时自动接管。worker 在新会话使用对应编号的新邀请自动换绑，大脑通过 `handoff-invite` 输出接替提示词；`assign` 改派未执行任务。见[多执行员接入](skills/task-dispatch/references/workers.md)。
+## 项目亮点
 
-服务协作的默认入口为 `node runtime/desktop-client.cjs connect --provider <真实平台>`：当前目录作为项目、当前会话作为 brain，自动启动服务并生成绑定凭据。connect/rebind 必须由接收端明确平台，不从目录或其他 IDE 猜测。brain/reviewer 支持 Codex、MiMo、Qoder、OpenCode、CodeArts、DSH 六种 wake 平台；worker 可用合法 provider。六种 wake 平台严格核验真实会话，只有执行员可使用其他 provider，无需 session ID、持续 wait。Codex 仅在显式 `--provider codex` 后读取 CODEX_THREAD_ID；Qoder 首次连接可使用邀请自带的一次性 `--invitation-id`，无需人工查找 session ID。reviewer 初审不会因无心跳被撤销，确定终止时显式 detach。
+| 能力 | 对实际开发有什么帮助 |
+| --- | --- |
+| **不同平台，同一支团队** | Codex、MiMo、Qoder/QoderCN、OpenCode、CodeArts、DSH 的现有会话可以承担不同角色，在同一个项目中交接。 |
+| **按能力分工** | 默认“大脑＋初审端＋一名执行员”；支持多个执行员编号、能力标签与职责，任务可定向派给匹配成员。 |
+| **逐项初审，整阶段终审** | 初审端先检查每项实现，大脑再验收完整功能。终审发现问题后追加关联修复任务，保留原任务与修复轮的证据。 |
+| **目标排队，成员复用** | 同一目录沿用项目、团队和会话绑定。新目标经你明确开始后加入队列，当前目标验收完成再继续下一个。 |
+| **看得见依赖与阻塞** | Web 控制台集中展示项目、成员、任务依赖图、阶段结论和事件；能定位“等待谁”“卡在哪一步”。 |
+| **原会话唤醒与续接** | 支持的平台通过原会话接收交接通知。状态持久化，恢复时按原任务继续；通知送达、实际领取和结果提交分别记录。 |
+| **结果有证据** | 保存候选快照、审核回执、修复关联与配置的验证报告；展示已观测用量，未知用量明确标记。 |
 
-Skill 安装时生成不含令牌的 `runtime-link.json`，指向本仓库客户端并声明按工作区解析项目数据目录。桌面 `connect` 成功后保存连接描述并返回最终状态；已持有本端凭据时直接 `resume`，缺少凭据路径时才用 `discover` 只读定位，排查问题时再用 `status`。自定义服务目录需沿用用户提供的 `--data`。状态格式保持 version 2；结构完整的现行数据继续使用，不完整旧数据明确拒绝，不自动补齐。见[服务发现与接入](skills/task-dispatch/references/connection.md)。
+**当前协作范围：同一台机器、同一个项目工作目录。** 单项目内的执行与审核串行调度；多个执行员用于职责与能力分工。目标创建和成员接入只做准备，全部就绪后由用户点击「开始」。
 
-项目快照、清理策略、消耗统计与独立验证环境仍由运行时管理接口保留，见[存储与消耗说明](docs/storage-usage.md)和[独立验证环境](docs/review-validation.md)；它们不再出现在 `start.bat` 的日常入口中。
+## 一次协作如何完成
 
-Codex、MiMo、Qoder、OpenCode、CodeArts、DSH 桌面会话通过 `connect/resume → claim → submit → park` 协作。修改运行时代码后，服务和客户端需同步更新并在安全边界重启服务。
-
-唯一工作流为完整功能阶段集中终审：大脑制定完整计划，plan 登记草案，stage-register 提交后执行；小脑逐项初审，全部通过后大脑整体终审。发现问题由大脑追加关联修复任务并再次验收；阶段通过才进入下一阶段。操作见[阶段计划与终审](skills/task-dispatch/references/stages.md)。状态保持 version 2，结构完整的现行数据继续使用，依赖已移除机制的旧队列明确拒绝。修改运行时代码后需重启服务才生效。
-
-**Windows 的 `start.bat` 现在只是桌面客户端入口，不再启动旧 CLI/headless 菜单。** 双击会显示常用命令；在终端中可直接执行 `start.bat connect ...`、`start.bat resume ...`、`start.bat status ...`。`connect` 会按需初始化并启动本地服务。用户已明确指定的平台直接复用，仅缺失时询问。服务已就绪时只需一次轻量检查和一次连接请求；连接变更合并持久化，原样重连不重复写入。
-
-**任务看板与控制台由 `dashboard.bat` 提供。** 双击直接进入统一 Web 控制台主页：项目目录表有多少项目就显示多少张卡片，点击卡片在同一端口进入该项目控制台。项目统一从目录主页选择；Web 启动器不接受 `--data` / `--workspace` 直连参数。原命令行菜单保留为 `dashboard.bat --cli`，空清单时进入刷新等待模式。
-
-<!-- [AI-added] 2026-09-17 11:46 -->
-新建桌面项目默认使用项目内 `.task-dispatch/runtime/<项目路径摘要>/`，状态、快照、收据、审核副本和角色凭据均严格保存在该私有运行目录；`.task-dispatch/.gitignore` 会忽略 `runtime/`，候选快照也强制排除它。系统缓存只保存不含令牌的项目目录清单（项目工作目录与数据目录映射），不再创建空的用户级公共服务。自定义目录可显式追加 `--data "数据目录"`；系统索引目录不能承载服务数据。不支持旧目录发现或旧数据迁移，结构不完整的数据会明确拒绝加载。
-
-运行时支持多项目队列、执行与审核分离、阶段修复轮和持久化恢复。Node.js 22+（OpenCode 需 22.13+），无需第三方依赖。配置只包含版本与并发上限；Skill 安装器不会启动服务。
-
-完整配置、启动、恢复和角色隔离边界见 [运行文档](docs/runtime.md)。已知缺陷、存储占用实测与修复顺序见 [运行服务健康排查](docs/service-health-audit.md)。初始任务示例在 `examples/`。支持 Codex、MiMo、Qoder/QoderCN、OpenCode、CodeArts 和 DSH 现有桌面会话，不启动无人值守模型进程。connect 自动核验真实会话、完成绑定并待命；后续使用 resume。
-
-## 一键安装
-
-需要 Node.js 22 或更新版本，OpenCode 需 22.13+；无 npm 依赖。双击 `install.bat`，输入平台名称；直接回车安装到所有平台。
-
-```bat
-install.bat codex
-install.bat codex,mimo,qoder,opencode
-install.bat codex --dry-run
+```mermaid
+flowchart LR
+  A[你：创建目标并邀请成员] --> B[成员就绪后点击开始]
+  B --> C[大脑：规划并登记阶段]
+  C --> D[执行员：实现任务]
+  D --> E[初审端：逐项检查]
+  E -->|需要返修| D
+  E -->|本阶段全部初审通过| F[大脑：完整功能终审]
+  F -->|追加关联修复任务| D
+  F -->|全部阶段及目标验收通过| G[完成目标，继续队列或待命]
 ```
 
-也可跨平台执行 `node scripts/install.js codex`。`--home DIRECTORY` 可指定测试用户目录；默认使用当前用户目录。与参考包一致采用 Skill 文件复制安装，不注册插件市场、不自动配置模型或 API Key。
-
-| 平台 | 用户目录下安装位置 |
+| 角色 | 负责什么 |
 | --- | --- |
-| codex | `.codex/skills/task-dispatch` |
-| mimo | `.config/mimocode/skills/task-dispatch`（YAML frontmatter） |
-| qoder | `.qoder/skills/task-dispatch`，桥接位于 `.qoder/app/dev-extensions/task-dispatch-bridge` |
-| qodercn | `.qoder-cn/skills/task-dispatch`，桥接位于 `.qoder-cn/app/dev-extensions/task-dispatch-bridge`（兼容别名 `qoder-cn`） |
-| opencode | `.config/opencode/skills/task-dispatch` |
+| **大脑 / brain** | 拆解目标、安排依赖与执行员、登记阶段、处理阻塞、整体验收和目标收尾。 |
+| **初审端 / reviewer** | 按任务契约只读初审，发现问题退回执行员，初审通过后等待阶段终审。 |
+| **执行员 / worker** | 领取指定任务，只修改授权范围内的文件，提交产物与验证结果，按反馈返修。 |
 
-安装器支持上表中的平台；CodeArts 使用已有 Hook 环境，DSH 通过本机 Remote API 接入，见 [DSH 接入](skills/task-dispatch/references/dsh.md)。大脑和小脑可使用全部六种 wake 平台，只有执行员可使用非 wake 平台。Qoder 与 QoderCN 是同一角色平台的两个产品安装目录，运行时 provider 均使用 `qoder`。
+例如开发登录功能：先拆出接口、页面和登录态处理，逐项实现并初审，最后由大脑检查完整的登录、退出和异常路径。**初审通过不等于最终验收**；修复后仍需重新接受阶段终审。
 
-## 使用
+## 快速上手
+
+下面以 Windows 的 Web 控制台为主线。先准备 Node.js 22+，以及三个独立的 AI 会话；三个角色可以来自同一平台，也可以混用不同平台。各会话需要能执行本地命令，并在宿主中打开**同一个项目目录**。
+
+*以下截图来自真实控制台前端，使用隔离演示数据，不包含真实项目、凭据或模型调用记录。点击图片可查看大图。*
+
+### 1. 获取项目并安装 Skill
+
+```powershell
+git clone https://github.com/wjzhaoo/task-dispatch.git
+cd task-dispatch
+
+# 按你使用的平台安装，也可以用逗号指定多个
+node scripts/install.js codex
+node scripts/install.js codex,mimo,qoder,opencode
+```
+
+Windows 也可以双击 `install.bat`，输入平台名称；直接回车安装到全部五个安装目标。安装到 Qoder/QoderCN 后重启宿主，让桥接插件加载。
+
+无需 `npm install`。安装器复制 Skill 并生成指向本仓库客户端的 `runtime-link.json`，不启动服务，也不配置模型或 API Key。**请保留仓库目录；移动后重新运行安装命令。**
+
+### 2. 打开控制台，填写目标
+
+在仓库目录双击 `dashboard.bat`，或运行：
+
+```powershell
+node runtime/web-console.cjs
+```
+
+启动器会打开浏览器，默认端口为 **43187**；占用时自动顺延，已有控制台则复用。主页点击「创建目标」，填写三个字段：
+
+| 字段 | 示例 |
+| --- | --- |
+| 目标名称 | 完成游戏存档功能 |
+| 项目工作目录 | `D:\projects\game-demo`（替换成你已有的项目绝对路径） |
+| 目标与验收要求 | 支持手动保存与继续游戏；重启后恢复进度；存档损坏时给出提示；已有功能无回归。 |
+
+![创建目标：填写名称、项目目录与验收要求](docs/images/readme/create-goal.jpg)
+
+默认三名成员即可开始。需要不同职责的执行员时，展开「高级成员设置」，填写编号、能力标签与职责。点击「创建目标」后，目标保持**待开始**。
+
+### 3. 邀请大脑、初审端和执行员
+
+进入项目的「总览」，在「项目成员」中为缺少的角色点击「复制加入邀请」，选择接收会话的真实平台，把生成的提示词原样粘贴到对应会话。
+
+![成员接入：为三个独立会话复制加入邀请](docs/images/readme/invite-members.jpg)
+
+三个成员可以同时接入，顺序不限。邀请包含项目与角色信息，接收端按提示完成身份核验、保存独立凭据并待命。Web 已保存成员配置，大脑无需再次配置团队或生成其他成员邀请。
+
+等「已就绪」达到 **3 / 3** 后，再开始目标。仅在终端中 `cd` 不等于宿主已打开正确工作区；出现接入问题时，先核对三个会话实际打开的项目目录。
+
+### 4. 点击开始，持续追加目标
+
+在目标卡片点击「开始」，大脑开始规划阶段并派发任务。进入「任务」页签，可以查看依赖关系、初审状态与阶段终审结论；「事件」页签用于追踪交接与异常。
+
+<details>
+<summary>查看完整任务看板截图：依赖关系、阶段终审与补修进度</summary>
+
+![任务全景：任务依赖、阶段终审和补修进度](docs/images/readme/task-board.jpg)
+
+</details>
+
+后续点击「新增目标」，沿用现有成员。新目标先保存为待开始；已有活动目标时，点击「加入队列」才会排队执行。
+
+![目标队列：当前目标执行中，后续目标排队，成员继续复用](docs/images/readme/goal-queue.jpg)
+
+当前目标由大脑明确完成验收后，服务继续下一个已授权目标；队列为空时保留成员待命。需要处理阻塞、换绑会话或恢复服务时，参阅[统一 Web 控制台](docs/admin-console.md)与[服务发现与接入](skills/task-dispatch/references/connection.md)。
+
+### 只想先体验规划？
 
 安装后新建对话，输入：
 
-> 使用 $task-dispatch，把当前功能拆成可交接任务包，标注模型角色、依赖和审核点。
-
-也可要求“只规划”“审核这批结果”或“按已授权工具执行”。没有外部模型接口时生成手动交接包，不会声称已经调用其他模型。其他工具若不支持 `$` 调用语法，可直接要求读取其安装目录的 `SKILL.md`。
-
-## 升级与验证
-
-更新本目录文件后再次运行安装命令。安装器按内容判断更新，不仅检查版本号。已安装文件被手动修改且与新版冲突时，会在写入前停止并指出路径；先备份或移走冲突文件，再重试。用户额外添加的文件和新版已移除的旧文件保留，不执行目录清空；正常升级只覆盖确认未被修改的同名文件。每个平台保存 `.task-dispatch-install.json` 作为内容记录。
-
-```bat
-node scripts/verify.js
+```text
+使用 $task-dispatch，为当前项目规划登录功能。
+先只输出任务拆分、各角色职责、依赖关系和验收要求，暂不执行。
 ```
 
-验证在系统临时目录完成，覆盖首次安装、重复安装、升级、冲突保护和安装预览，不修改真实技能目录。临时目录在结果中打印并保留供检查。
+也可以要求生成手动交接包。没有外部模型接口时，Skill 会输出可转交的任务说明；自动协作需要按上面的步骤实际接入各角色。OpenCode 可使用 `@task-dispatch`，其他不支持 `$` 调用的宿主可要求读取安装目录中的 `SKILL.md`。
 
-`.codex-plugin/plugin.json` 仍保留为原生插件封装入口；本安装脚本只安装 Skill，不会让它出现在插件市场的已安装列表。无需同时进行两种安装。
+## 支持平台
+
+Skill 安装目标与运行时接入平台分别如下。大脑、初审端和执行员均可使用下表中的六种运行时平台。
+
+| 平台 | 安装或接入方式 | 会话接入说明 |
+| --- | --- | --- |
+| Codex | `node scripts/install.js codex` | 显式使用 `--provider codex` 后读取当前 `CODEX_THREAD_ID`；[桌面接入](skills/task-dispatch/references/desktop.md)。 |
+| MiMo | `node scripts/install.js mimo` | 使用真实会话 ID 与原会话唤醒；[接入说明](docs/mimo-wake-integration.md)。 |
+| Qoder / QoderCN | `node scripts/install.js qoder` / `qodercn` | 安装 Skill 与 App Plugin 桥接，重启宿主后生效；两者 provider 均为 `qoder`；[接入说明](skills/task-dispatch/references/qoder.md)。 |
+| OpenCode 2.x | `node scripts/install.js opencode` | 需 Node.js 22.13+、真实 `ses_...` 会话 ID、可读会话数据库和官方 CLI；[接入说明](skills/task-dispatch/references/opencode.md)。 |
+| CodeArts | 已有独立 Hook bridge 环境 | 使用 `--provider codearts`，不在一键安装目标中；[接入说明](skills/task-dispatch/references/codearts.md)。 |
+| DSH / DeepSeek Harness Desktop | 本机 Remote API | 使用 `--provider dsh`，不在一键安装目标中；[接入说明](skills/task-dispatch/references/dsh.md)。 |
+
+其他合法 provider 仅可接入执行员，使用持续 `wait` 模式。原会话自动唤醒依赖宿主支持与真实身份核验，具体条件以各平台文档为准。
+
+<details>
+<summary>展开查看安装目录与常用入口</summary>
+
+| 安装目标 | 用户目录下的 Skill 位置 |
+| --- | --- |
+| `codex` | `.codex/skills/task-dispatch` |
+| `mimo` | `.config/mimocode/skills/task-dispatch` |
+| `qoder` | `.qoder/skills/task-dispatch` |
+| `qodercn` | `.qoder-cn/skills/task-dispatch`（兼容别名 `qoder-cn`） |
+| `opencode` | `.config/opencode/skills/task-dispatch` |
+
+Qoder/QoderCN 的桥接分别位于 `.qoder/app/dev-extensions/task-dispatch-bridge` 与 `.qoder-cn/app/dev-extensions/task-dispatch-bridge`。
+
+| 入口 | 用途 |
+| --- | --- |
+| `install.bat` | Windows 交互安装；直接回车安装全部五个目标。 |
+| `dashboard.bat` / `web-console.bat` | 打开统一 Web 控制台。 |
+| `start.bat` | 桌面客户端命令包装，如 `connect`、`resume`、`status`；双击查看常用命令。 |
+| `dashboard.bat --cli` | 原命令行管理菜单。 |
+
+</details>
+
+## 本地数据与恢复
+
+每个项目默认把状态、快照、审核副本和角色凭据保存在自己的 `.task-dispatch/runtime/<项目路径摘要>/` 中；该运行目录由局部 `.gitignore` 与快照策略排除。系统目录只登记项目路径映射，不保存角色令牌。
+
+服务重启保留队列、开始授权与已登记状态。会话恢复优先使用 `resume`，换人使用管理台的改绑邀请；结构不完整的旧数据会明确拒绝加载。修改运行时代码后，需在安全边界重启服务，已安装 Skill 的更新也需重新运行安装器。
+
+## 文档导航
+
+| 你想做什么 | 阅读 |
+| --- | --- |
+| 查看控制台全部操作、目标队列与排障 | [统一 Web 控制台](docs/admin-console.md) |
+| 接入会话、理解首次连接与续接 | [服务发现与接入](skills/task-dispatch/references/connection.md) · [桌面客户端](skills/task-dispatch/references/desktop.md) |
+| 配置多个执行员、定向派单与交接 | [多执行员接入](skills/task-dispatch/references/workers.md) |
+| 了解阶段计划、完整功能终审与修复轮 | [阶段计划与终审](skills/task-dispatch/references/stages.md) |
+| 配置独立验证、检查产物与审核证据 | [独立验证环境](docs/review-validation.md) · [证据校验示例](examples/evidence-validation/README.md) |
+| 管理快照、缓存、尝试额度与用量 | [存储与消耗](docs/storage-usage.md) · [尝试预算](docs/attempt-budgets.md) |
+| 查看运行配置、恢复规则与已知问题 | [运行文档](docs/runtime.md) · [服务健康排查](docs/service-health-audit.md) |
+| 查看版本变化 | [CHANGELOG](CHANGELOG.md) · [版本源文件](VERSION) |
+
+## 升级与开发验证
+
+更新仓库后，再次运行对应平台的安装命令。安装器按内容判断变更；发现已安装文件被手动修改且与新版冲突时，会停止并指出路径，不直接覆盖。用户额外添加的文件会保留。
+
+```powershell
+# 安装预览，不写入真实技能目录
+node scripts/install.js codex --dry-run
+
+# 运行时回归
+npm test
+
+# 安装、重复安装、升级和冲突保护验证
+node scripts/verify.js
+
+# 用正式前端资源打开隔离演示，不连接真实调度或模型
+node scripts/task-board-preview.cjs
+```
+
+安装验证使用系统临时目录，结束后打印并保留目录供检查。演示脚本会输出本地地址，可浏览任务看板、目标队列和成员接入界面；演示中的写入操作不会提交。
+
+`.codex-plugin/plugin.json` 同时保留原生插件封装入口。本文的一键安装采用 Skill 复制方式，无需同时进行两种安装。
